@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for f:*)",
+      "Bash(cd:*)",
+      "Bash(mkdir:*)",
+      "Bash(\"C:/BrxAI/venv/Scripts/pip\" install:*)",
+      "Bash(\"C:/BrxAI/venv/Scripts/python\" -c \"\nimport pandas as pd\n\ndf = pd.read_csv\\('C:/Users/gbami/OneDrive/Bureau/Projets Data/BrouxAI/backend/tests/fixtures/sample_ventes.csv'\\)\ndf.to_excel\\('C:/Users/gbami/OneDrive/Bureau/Projets Data/BrouxAI/backend/tests/fixtures/sample_ventes.xlsx', index=False\\)\nprint\\(f'Excel créé : {len\\(df\\)} lignes, {len\\(df.columns\\)} colonnes'\\)\nprint\\('Colonnes:', list\\(df.columns\\)\\)\n\")"
+    ]
+  }
+}
