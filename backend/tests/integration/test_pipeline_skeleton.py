@@ -5,8 +5,12 @@ Vérifie que :
 2. Chaque agent a bien écrit dans sa clé de state
 3. Le status final n'est pas "error"
 
-Note : à partir de Sprint 2, le MetadataAgent est réel et appelle storage + LLM.
-Ces dépendances externes sont mockées ici pour rester en test unitaire pur.
+Notes :
+- Sprint 2 : MetadataAgent réel → appels storage + LLM mockés.
+- Sprint 3 : SchemaLinkingAgent réel → appels storage + LLM mockés.
+  En mode fichier unique (1 ref), SchemaLinkingAgent ne fait aucun appel externe
+  mais les mocks sont présents pour documenter l'intention et protéger les futures
+  évolutions vers des tests multi-fichiers.
 """
 
 from __future__ import annotations
@@ -61,10 +65,10 @@ def pipeline():
 
 
 @pytest.fixture(autouse=True)
-def mock_metadata_deps():
-    """Mocke les appels externes du MetadataAgent pour tous les tests du module.
+def mock_external_deps():
+    """Mocke les appels externes de MetadataAgent et SchemaLinkingAgent.
 
-    - read_dataframe → retourne un DataFrame minimal en mémoire
+    - read_dataframe → retourne un DataFrame minimal en mémoire (les deux agents)
     - call_llm_json  → retourne toujours une réponse valide sans appel réseau
     """
     with (
@@ -75,6 +79,14 @@ def mock_metadata_deps():
         patch(
             "app.agents.metadata_agent.call_llm_json",
             AsyncMock(return_value=_LLM_ANY_RESPONSE),
+        ),
+        patch(
+            "app.agents.schema_linking_agent.read_dataframe",
+            AsyncMock(return_value=_MOCK_DF),
+        ),
+        patch(
+            "app.agents.schema_linking_agent.call_llm_json",
+            AsyncMock(return_value={"description": "Relation de test."}),
         ),
     ):
         yield

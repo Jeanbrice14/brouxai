@@ -1,0 +1,16 @@
+id,nom,region,segment
+CLI001,Dupont SA,Nord,PME
+CLI002,Martin & Fils,Ouest,ETI
+CLI003,Bernard Tech,Est,PME
+CLI004,Petit Commerce,Ouest,TPE
+CLI005,Grand Groupe IDF,Ile-de-France,ETI
+CLI006,Lopez Distribution,Sud,PME
+CLI007,Moreau Industries,Nord,ETI
+CLI008,Simon Conseil,Sud,PME
+CLI009,Laurent BTP,Est,TPE
+CLI010,Fontaine Retail,Ile-de-France,PME
+CLI011,Rousseau Agro,Ouest,TPE
+CLI012,Vincent Pharma,Nord,ETI
+CLI013,Leroy Digital,Est,PME
+CLI014,David Energie,Sud,ETI
+CLI015,Garnier Services,Ile-de-France,TPE
