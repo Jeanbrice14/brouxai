@@ -11,6 +11,8 @@ Notes :
 - Sprint 4 : DataAgent réel → cache mocké (hit), LLM + storage non appelés via cache hit.
 - Sprint 5 : InsightAgent réel → call_llm_json mocké (confidence ≥ 0.80, pas d'anomalie → pas de HITL).
              StorytellingAgent réel → call_llm mocké (narration > 200 mots).
+- Sprint 6 : VizAgent réel → call_llm_json mocké (viz_spec valide pour by_region).
+             QAAgent réel → call_llm_json mocké (0 issue → confidence_score 1.0).
 """
 
 from __future__ import annotations
@@ -47,6 +49,19 @@ _MOCK_INSIGHTS_RESPONSE = {
             "impact": "high",
         }
     ]
+}
+
+# viz_spec valide retournée par le mock VizAgent — data_key cohérent avec _CACHED_AGGREGATES
+_MOCK_VIZ_SPEC = {
+    "chart_type": "bar",
+    "title": "CA par région",
+    "data_key": "by_region",
+    "x": "region",
+    "y": "ca_ht",
+    "color_by": None,
+    "colors": {"primary": "#1E3A8A", "positive": "#16A34A", "negative": "#DC2626"},
+    "annotations": [],
+    "insight_ref": "Domination Nord",
 }
 
 # Narration longue (> 200 mots) sans Markdown — retournée par le mock StorytellingAgent
@@ -106,6 +121,8 @@ def mock_external_deps():
     - DataAgent          : cache hit mocké → LLM + storage non nécessaires
     - InsightAgent       : call_llm_json mocké (1 insight, confidence 0.90, pas de HITL)
     - StorytellingAgent  : call_llm mocké (narration > 200 mots, pas de re-génération)
+    - VizAgent           : call_llm_json mocké (viz_spec valide pour by_region)
+    - QAAgent            : call_llm_json mocké (0 issue → confidence_score 1.0, pas de HITL)
     """
     with (
         patch(
@@ -139,6 +156,14 @@ def mock_external_deps():
         patch(
             "app.agents.storytelling_agent.call_llm",
             AsyncMock(return_value=_MOCK_NARRATIVE),
+        ),
+        patch(
+            "app.agents.viz_agent.call_llm_json",
+            AsyncMock(return_value=_MOCK_VIZ_SPEC),
+        ),
+        patch(
+            "app.agents.qa_agent.call_llm_json",
+            AsyncMock(return_value={"issues": []}),
         ),
     ):
         yield

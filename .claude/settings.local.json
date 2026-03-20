@@ -17,7 +17,8 @@
       "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/integration/test_pipeline_skeleton.py -v)",
       "Bash(C:/BrxAI/venv/Scripts/ruff.exe format:*)",
       "Bash(C:/BrxAI/venv/Scripts/ruff.exe check:*)",
-      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/ -v --tb=short)"
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/ -v --tb=short)",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/unit/test_viz_agent.py tests/unit/test_qa_agent.py -v)"
     ]
   }
 }
