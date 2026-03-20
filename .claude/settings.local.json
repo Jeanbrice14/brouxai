@@ -12,7 +12,12 @@
       "Bash(\"C:/BrxAI/venv/Scripts/pytest.exe\" tests/unit/ tests/integration/ -v)",
       "Bash(\"C:/BrxAI/venv/Scripts/ruff.exe\" format:*)",
       "Bash(\"C:/BrxAI/venv/Scripts/ruff.exe\" check:*)",
-      "Bash(\"C:/BrxAI/venv/Scripts/pytest.exe\" tests/unit/ tests/integration/ -v --tb=no -q)"
+      "Bash(\"C:/BrxAI/venv/Scripts/pytest.exe\" tests/unit/ tests/integration/ -v --tb=no -q)",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/unit/test_insight_agent.py tests/unit/test_storytelling_agent.py -v)",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/integration/test_pipeline_skeleton.py -v)",
+      "Bash(C:/BrxAI/venv/Scripts/ruff.exe format:*)",
+      "Bash(C:/BrxAI/venv/Scripts/ruff.exe check:*)",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/ -v --tb=short)"
     ]
   }
 }

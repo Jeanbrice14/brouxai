@@ -9,6 +9,8 @@ Notes :
 - Sprint 2 : MetadataAgent réel → appels storage + LLM mockés.
 - Sprint 3 : SchemaLinkingAgent réel → appels storage + LLM mockés (single-file → pas d'appels réels).
 - Sprint 4 : DataAgent réel → cache mocké (hit), LLM + storage non appelés via cache hit.
+- Sprint 5 : InsightAgent réel → call_llm_json mocké (confidence ≥ 0.80, pas d'anomalie → pas de HITL).
+             StorytellingAgent réel → call_llm mocké (narration > 200 mots).
 """
 
 from __future__ import annotations
@@ -32,6 +34,34 @@ _MOCK_DF = pd.DataFrame(
 
 # Agrégats pré-calculés retournés par le mock cache DataAgent (cache hit)
 _CACHED_AGGREGATES = {"by_region": [{"region": "Nord", "ca_ht": 12500.0}]}
+
+# Réponse InsightAgent : confidence ≥ 0.80, type "highlight" → pas de HITL
+_MOCK_INSIGHTS_RESPONSE = {
+    "insights": [
+        {
+            "title": "Domination Nord",
+            "description": "Le Nord génère le CA le plus élevé.",
+            "type": "highlight",
+            "confidence": 0.90,
+            "supporting_data": "ca_ht Nord: 12500",
+            "impact": "high",
+        }
+    ]
+}
+
+# Narration longue (> 200 mots) sans Markdown — retournée par le mock StorytellingAgent
+_MOCK_NARRATIVE = (
+    "L'analyse des ventes régionales révèle des disparités marquées entre les zones géographiques. "
+    "Le Nord se positionne comme la région la plus performante de la période étudiée. "
+    "Cette concentration géographique mérite une attention particulière dans la stratégie commerciale. "
+    "Les équipes commerciales du Nord ont su capitaliser sur les opportunités du marché local. "
+    "En termes de recommandations, trois axes prioritaires se dégagent de cette analyse approfondie. "
+    "Premièrement, renforcer la présence commerciale dans les régions sous-performantes identifiées. "
+    "Deuxièmement, capitaliser sur le succès du Nord pour dupliquer les bonnes pratiques existantes. "
+    "Troisièmement, mettre en place un suivi mensuel des indicateurs clés par région géographique. "
+    "La redistribution des ressources commerciales constitue également une piste sérieuse à explorer. "
+    "Un plan d'action spécifique devra être déployé pour améliorer la performance globale. "
+) * 3  # ~300 mots
 
 # Réponse LLM universelle : satisfait aussi bien les appels "colonne" que "grain"
 _LLM_ANY_RESPONSE = {
@@ -67,12 +97,15 @@ def pipeline():
 
 @pytest.fixture(autouse=True)
 def mock_external_deps():
-    """Mocke les appels externes de MetadataAgent, SchemaLinkingAgent et DataAgent.
+    """Mocke les appels externes de MetadataAgent, SchemaLinkingAgent, DataAgent,
+    InsightAgent et StorytellingAgent.
 
     Stratégie par agent :
-    - MetadataAgent    : read_dataframe + call_llm_json mockés
+    - MetadataAgent      : read_dataframe + call_llm_json mockés
     - SchemaLinkingAgent : read_dataframe + call_llm_json mockés (single-file → non appelés)
-    - DataAgent        : cache hit mocké → LLM + storage non nécessaires
+    - DataAgent          : cache hit mocké → LLM + storage non nécessaires
+    - InsightAgent       : call_llm_json mocké (1 insight, confidence 0.90, pas de HITL)
+    - StorytellingAgent  : call_llm mocké (narration > 200 mots, pas de re-génération)
     """
     with (
         patch(
@@ -98,6 +131,14 @@ def mock_external_deps():
         patch(
             "app.agents.data_agent.set_cache",
             AsyncMock(),
+        ),
+        patch(
+            "app.agents.insight_agent.call_llm_json",
+            AsyncMock(return_value=_MOCK_INSIGHTS_RESPONSE),
+        ),
+        patch(
+            "app.agents.storytelling_agent.call_llm",
+            AsyncMock(return_value=_MOCK_NARRATIVE),
         ),
     ):
         yield
