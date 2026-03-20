@@ -7,10 +7,8 @@ Vérifie que :
 
 Notes :
 - Sprint 2 : MetadataAgent réel → appels storage + LLM mockés.
-- Sprint 3 : SchemaLinkingAgent réel → appels storage + LLM mockés.
-  En mode fichier unique (1 ref), SchemaLinkingAgent ne fait aucun appel externe
-  mais les mocks sont présents pour documenter l'intention et protéger les futures
-  évolutions vers des tests multi-fichiers.
+- Sprint 3 : SchemaLinkingAgent réel → appels storage + LLM mockés (single-file → pas d'appels réels).
+- Sprint 4 : DataAgent réel → cache mocké (hit), LLM + storage non appelés via cache hit.
 """
 
 from __future__ import annotations
@@ -31,6 +29,9 @@ _MOCK_DF = pd.DataFrame(
         "region": ["Nord", "Sud"],
     }
 )
+
+# Agrégats pré-calculés retournés par le mock cache DataAgent (cache hit)
+_CACHED_AGGREGATES = {"by_region": [{"region": "Nord", "ca_ht": 12500.0}]}
 
 # Réponse LLM universelle : satisfait aussi bien les appels "colonne" que "grain"
 _LLM_ANY_RESPONSE = {
@@ -66,10 +67,12 @@ def pipeline():
 
 @pytest.fixture(autouse=True)
 def mock_external_deps():
-    """Mocke les appels externes de MetadataAgent et SchemaLinkingAgent.
+    """Mocke les appels externes de MetadataAgent, SchemaLinkingAgent et DataAgent.
 
-    - read_dataframe → retourne un DataFrame minimal en mémoire (les deux agents)
-    - call_llm_json  → retourne toujours une réponse valide sans appel réseau
+    Stratégie par agent :
+    - MetadataAgent    : read_dataframe + call_llm_json mockés
+    - SchemaLinkingAgent : read_dataframe + call_llm_json mockés (single-file → non appelés)
+    - DataAgent        : cache hit mocké → LLM + storage non nécessaires
     """
     with (
         patch(
@@ -87,6 +90,14 @@ def mock_external_deps():
         patch(
             "app.agents.schema_linking_agent.call_llm_json",
             AsyncMock(return_value={"description": "Relation de test."}),
+        ),
+        patch(
+            "app.agents.data_agent.get_cache",
+            AsyncMock(return_value=_CACHED_AGGREGATES),
+        ),
+        patch(
+            "app.agents.data_agent.set_cache",
+            AsyncMock(),
         ),
     ):
         yield

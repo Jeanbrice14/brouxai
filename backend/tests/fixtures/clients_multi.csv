@@ -1,0 +1,16 @@
+id,nom,region,segment,ca_cumul
+CLI001,Dupont SA,Nord,PME,145000
+CLI002,Martin & Fils,Ouest,ETI,320000
+CLI003,Bernard Tech,Est,PME,98000
+CLI004,Petit Commerce,Ouest,TPE,42000
+CLI005,Grand Groupe IDF,Ile-de-France,ETI,870000
+CLI006,Lopez Distribution,Sud,PME,215000
+CLI007,Moreau Industries,Nord,ETI,560000
+CLI008,Simon Conseil,Sud,PME,133000
+CLI009,Laurent BTP,Est,TPE,67000
+CLI010,Fontaine Retail,Ile-de-France,PME,288000
+CLI011,Rousseau Agro,Ouest,TPE,39000
+CLI012,Vincent Pharma,Nord,ETI,720000
+CLI013,Leroy Digital,Est,PME,195000
+CLI014,David Energie,Sud,ETI,480000
+CLI015,Garnier Services,Ile-de-France,TPE,55000
