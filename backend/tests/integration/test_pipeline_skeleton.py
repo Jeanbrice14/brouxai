@@ -13,6 +13,7 @@ Notes :
              StorytellingAgent réel → call_llm mocké (narration > 200 mots).
 - Sprint 6 : VizAgent réel → call_llm_json mocké (viz_spec valide pour by_region).
              QAAgent réel → call_llm_json mocké (0 issue → confidence_score 1.0).
+- Sprint 7 : LayoutAgent réel → upload_file mocké (pas d'appel MinIO).
 """
 
 from __future__ import annotations
@@ -123,6 +124,7 @@ def mock_external_deps():
     - StorytellingAgent  : call_llm mocké (narration > 200 mots, pas de re-génération)
     - VizAgent           : call_llm_json mocké (viz_spec valide pour by_region)
     - QAAgent            : call_llm_json mocké (0 issue → confidence_score 1.0, pas de HITL)
+    - LayoutAgent        : upload_file mocké (pas d'appel MinIO réel)
     """
     with (
         patch(
@@ -164,6 +166,10 @@ def mock_external_deps():
         patch(
             "app.agents.qa_agent.call_llm_json",
             AsyncMock(return_value={"issues": []}),
+        ),
+        patch(
+            "app.agents.layout_agent.upload_file",
+            AsyncMock(),
         ),
     ):
         yield

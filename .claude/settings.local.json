@@ -18,7 +18,9 @@
       "Bash(C:/BrxAI/venv/Scripts/ruff.exe format:*)",
       "Bash(C:/BrxAI/venv/Scripts/ruff.exe check:*)",
       "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/ -v --tb=short)",
-      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/unit/test_viz_agent.py tests/unit/test_qa_agent.py -v)"
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/unit/test_viz_agent.py tests/unit/test_qa_agent.py -v)",
+      "Bash(C:/BrxAI/venv/Scripts/python.exe -c \"import jinja2; print\\(jinja2.__version__\\)\" 2>&1)",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/unit/test_layout_agent.py -v)"
     ]
   }
 }
