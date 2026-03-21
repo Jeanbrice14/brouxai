@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 import structlog
 
 from app.pipeline.state import PipelineState
+from app.services.report_store import save_report_state
 
 logger = structlog.get_logger(__name__)
 
@@ -48,6 +49,10 @@ class BaseAgent(ABC):
             log.error("agent_error", error=error_msg, traceback=traceback.format_exc())
             state["errors"] = state.get("errors", []) + [error_msg]
             state["status"] = "error"
+
+        # Persister le state dans Redis après chaque agent (pour WebSocket + reprise HITL)
+        if state.get("report_id"):
+            await save_report_state(state["report_id"], dict(state))
 
         return state
 

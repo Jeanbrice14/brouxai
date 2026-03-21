@@ -1,0 +1,109 @@
+### BrouxAI API — REST Client (VS Code)
+### Variables
+@baseUrl = http://localhost:8000
+@report_id = {{generate_report.response.body.report_id}}
+
+###############################################################################
+# Health check
+###############################################################################
+
+### Health check — vérifie pipeline, redis, storage
+GET {{baseUrl}}/health
+Accept: application/json
+
+###############################################################################
+# Générer un rapport
+###############################################################################
+
+### Générer un rapport (multipart/form-data)
+# @name generate_report
+POST {{baseUrl}}/api/v1/reports/generate
+Content-Type: multipart/form-data; boundary=----BrouxAIBoundary
+
+------BrouxAIBoundary
+Content-Disposition: form-data; name="prompt"
+
+Analyse les ventes par région pour le Q1 2024 et identifie les tendances principales
+------BrouxAIBoundary
+Content-Disposition: form-data; name="brand_kit"
+
+{"tone": "formel", "language": "fr", "colors": {"primary": "#1E3A8A"}}
+------BrouxAIBoundary
+Content-Disposition: form-data; name="files"; filename="ventes.csv"
+Content-Type: text/csv
+
+date,region,ca_ht,quantite
+2024-01-05,Nord,12500,45
+2024-01-12,IDF,42100,150
+2024-01-19,Sud,8750,32
+2024-02-03,Nord,13200,48
+2024-02-10,IDF,44500,160
+2024-02-17,Ouest,5400,20
+------BrouxAIBoundary--
+
+###############################################################################
+# Suivre le statut
+###############################################################################
+
+### Voir le statut d'un rapport (remplacer l'ID)
+GET {{baseUrl}}/api/v1/reports/{{report_id}}
+Accept: application/json
+
+### Voir le HTML d'un rapport (redirect vers MinIO)
+GET {{baseUrl}}/api/v1/reports/{{report_id}}/html
+Accept: text/html
+
+###############################################################################
+# HITL — Validation humaine
+###############################################################################
+
+### Approuver un checkpoint HITL (cp1_metadata)
+POST {{baseUrl}}/api/v1/reports/{{report_id}}/review
+Content-Type: application/json
+
+{
+  "checkpoint": "cp1_metadata",
+  "action": "approved",
+  "corrections": {}
+}
+
+### Corriger un checkpoint HITL (cp3_insights)
+POST {{baseUrl}}/api/v1/reports/{{report_id}}/review
+Content-Type: application/json
+
+{
+  "checkpoint": "cp3_insights",
+  "action": "corrected",
+  "corrections": {
+    "insights": [
+      {
+        "title": "Domination IDF corrigée",
+        "description": "L'IDF représente 45% du CA (corrigé manuellement).",
+        "type": "highlight",
+        "confidence": 0.95,
+        "supporting_data": "ca_ht IDF: 44500",
+        "impact": "high"
+      }
+    ]
+  }
+}
+
+### Rejeter un checkpoint HITL
+POST {{baseUrl}}/api/v1/reports/{{report_id}}/review
+Content-Type: application/json
+
+{
+  "checkpoint": "cp2_schema",
+  "action": "rejected",
+  "corrections": {}
+}
+
+###############################################################################
+# Swagger UI
+###############################################################################
+
+### Ouvrir la documentation Swagger
+GET {{baseUrl}}/docs
+
+### Ouvrir le schéma OpenAPI JSON
+GET {{baseUrl}}/openapi.json

@@ -20,7 +20,16 @@
       "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/ -v --tb=short)",
       "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/unit/test_viz_agent.py tests/unit/test_qa_agent.py -v)",
       "Bash(C:/BrxAI/venv/Scripts/python.exe -c \"import jinja2; print\\(jinja2.__version__\\)\" 2>&1)",
-      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/unit/test_layout_agent.py -v)"
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/unit/test_layout_agent.py -v)",
+      "Bash(C:/BrxAI/venv/Scripts/python.exe -c \"import httpx; print\\(httpx.__version__\\)\" 2>&1)",
+      "Bash(\"C:\\\\Users\\\\gbami\\\\OneDrive\\\\Bureau\\\\Projets Data\\\\BrouxAI\\\\backend\\\\tests\\\\api\\\\__init__.py\")",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/api/ -v)",
+      "Bash(C:/BrxAI/venv/Scripts/pip.exe install:*)",
+      "Bash(C:/BrxAI/venv/Scripts/pip.exe show:*)",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/api/ tests/unit/test_metadata_agent.py tests/integration/test_pipeline_skeleton.py -v --tb=short)",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/ --tb=short -q)",
+      "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/api/ tests/unit/ tests/integration/ -q)",
+      "Bash(echo \"EXIT: $?\")"
     ]
   }
 }
