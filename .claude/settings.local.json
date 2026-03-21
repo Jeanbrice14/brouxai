@@ -39,7 +39,13 @@
       "Bash(C:/BrxAI/venv/Scripts/python -m pytest tests/api/ -v)",
       "Bash(C:/BrxAI/venv/Scripts/python -m pytest tests/integration/test_hitl_flow.py -v)",
       "Bash(C:/BrxAI/venv/Scripts/python -m pytest tests/ -v)",
-      "Bash(C:/BrxAI/venv/Scripts/ruff check:*)"
+      "Bash(C:/BrxAI/venv/Scripts/ruff check:*)",
+      "Bash(npm --version)",
+      "Bash(npx create-next-app@latest frontend --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --yes)",
+      "Bash(npm install:*)",
+      "Bash(npx shadcn@latest init --yes --defaults)",
+      "Bash(npm run:*)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }
