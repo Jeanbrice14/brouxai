@@ -1,0 +1,31 @@
+client_id,nom,region,segment,commercial,date_entree,actif
+1,Entreprise A,Nord,PME,Claire Rousseau,2022-09-08,True
+2,Entreprise B,Sud,PME,Emma Bernard,2022-03-31,False
+3,Entreprise C,Nord,PME,Alice Martin,2022-08-12,True
+4,Entreprise D,Île-de-France,PME,Emma Bernard,2022-07-23,False
+5,Entreprise E,Sud,ETI,Emma Bernard,2022-10-12,True
+6,Entreprise F,Sud,ETI,Claire Rousseau,2022-10-12,True
+7,Entreprise G,Sud,TPE,Alice Martin,2022-04-05,False
+8,Entreprise H,Nord,TPE,Claire Rousseau,2023-09-11,True
+9,Entreprise I,Nord,ETI,Emma Bernard,2022-05-08,False
+10,Entreprise J,Nord,TPE,Emma Bernard,2023-01-06,True
+11,Entreprise K,Nord,PME,Bob Dupont,2022-10-24,True
+12,Entreprise L,Sud,PME,David Leroy,2022-10-12,False
+13,Entreprise M,Est,Grand Compte,Claire Rousseau,2022-12-30,True
+14,Entreprise N,Est,PME,Emma Bernard,2023-10-13,True
+15,Entreprise O,Île-de-France,Grand Compte,Bob Dupont,2023-04-19,False
+16,Entreprise P,Est,Grand Compte,Claire Rousseau,2022-02-27,True
+17,Entreprise Q,Nord,TPE,David Leroy,2022-10-02,True
+18,Entreprise R,Sud,TPE,Bob Dupont,2023-11-03,False
+19,Entreprise S,Ouest,ETI,Bob Dupont,2022-09-29,True
+20,Entreprise T,Sud,TPE,Emma Bernard,2023-03-15,False
+21,Entreprise U,Est,Grand Compte,Bob Dupont,2023-06-06,False
+22,Entreprise V,Nord,PME,Alice Martin,2022-06-06,True
+23,Entreprise W,Ouest,PME,David Leroy,2023-01-26,False
+24,Entreprise X,Île-de-France,TPE,Emma Bernard,2022-01-12,True
+25,Entreprise Y,Île-de-France,TPE,Claire Rousseau,2022-04-25,True
+26,Entreprise Z,Ouest,Grand Compte,David Leroy,2022-01-04,True
+27,Entreprise Z27,Île-de-France,Grand Compte,Emma Bernard,2022-04-19,True
+28,Entreprise Z28,Île-de-France,Grand Compte,Bob Dupont,2023-01-18,True
+29,Entreprise Z29,Île-de-France,PME,Emma Bernard,2022-11-28,False
+30,Entreprise Z30,Nord,PME,Claire Rousseau,2022-11-11,True

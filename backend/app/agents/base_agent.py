@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 import structlog
 
 from app.pipeline.state import PipelineState
+from app.services.notification import notify_hitl_required
 from app.services.report_store import save_report_state
 
 logger = structlog.get_logger(__name__)
@@ -53,6 +54,14 @@ class BaseAgent(ABC):
         # Persister le state dans Redis après chaque agent (pour WebSocket + reprise HITL)
         if state.get("report_id"):
             await save_report_state(state["report_id"], dict(state))
+
+        # Notifier si le pipeline attend une validation humaine
+        if state.get("hitl_pending") and state.get("hitl_checkpoint"):
+            await notify_hitl_required(
+                report_id=state["report_id"],
+                checkpoint=state["hitl_checkpoint"],
+                tenant_id=state.get("tenant_id", ""),
+            )
 
         return state
 

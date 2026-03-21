@@ -54,15 +54,19 @@ GET {{baseUrl}}/api/v1/reports/{{report_id}}/html
 Accept: text/html
 
 ###############################################################################
-# HITL — Validation humaine
+# HITL — Validation humaine (Sprint 9)
 ###############################################################################
 
-### Approuver un checkpoint HITL (cp1_metadata)
+### Récupérer les données à valider pour le checkpoint courant
+GET {{baseUrl}}/api/v1/reports/{{report_id}}/review
+Accept: application/json
+
+### Approuver un checkpoint HITL (cp3_insights)
 POST {{baseUrl}}/api/v1/reports/{{report_id}}/review
 Content-Type: application/json
 
 {
-  "checkpoint": "cp1_metadata",
+  "checkpoint": "cp3_insights",
   "action": "approved",
   "corrections": {}
 }
@@ -88,15 +92,19 @@ Content-Type: application/json
   }
 }
 
-### Rejeter un checkpoint HITL
+### Approuver cp1_metadata
 POST {{baseUrl}}/api/v1/reports/{{report_id}}/review
 Content-Type: application/json
 
 {
-  "checkpoint": "cp2_schema",
-  "action": "rejected",
+  "checkpoint": "cp1_metadata",
+  "action": "approved",
   "corrections": {}
 }
+
+### Rejeter le rapport (DELETE)
+DELETE {{baseUrl}}/api/v1/reports/{{report_id}}/review
+Accept: application/json
 
 ###############################################################################
 # Swagger UI

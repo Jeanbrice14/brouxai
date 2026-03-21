@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from app.api.v1.hitl import router as hitl_router
 from app.api.v1.reports import router as reports_router
 from app.pipeline.graph import build_pipeline
 
@@ -36,6 +37,7 @@ app = FastAPI(
 )
 
 app.include_router(reports_router)
+app.include_router(hitl_router)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

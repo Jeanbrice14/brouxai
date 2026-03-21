@@ -9,7 +9,7 @@ import structlog
 from fastapi import APIRouter, Form, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse, Response
 
-from app.models.report import HITLReviewRequest, ReportResponse, ReportStatus
+from app.models.report import ReportResponse, ReportStatus
 from app.pipeline.state import initial_state
 from app.services.report_store import get_report_state, save_report_state
 from app.services.storage import upload_file
@@ -140,68 +140,6 @@ async def get_report(report_id: str) -> ReportResponse:
         qa_report=state.get("qa_report", {}),
         error=error_str,
     )
-
-
-# ── POST /{report_id}/review ──────────────────────────────────────────────────
-
-
-@router.post("/{report_id}/review")
-async def review_report(report_id: str, body: HITLReviewRequest) -> dict:
-    """Endpoint HITL : l'humain soumet sa validation.
-
-    - Applique les corrections au state
-    - Remet hitl_pending = False
-    - Relance le pipeline en background
-    """
-    state = await get_report_state(report_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail=f"Rapport '{report_id}' introuvable.")
-
-    if not state.get("hitl_pending"):
-        raise HTTPException(status_code=409, detail="Aucune validation en attente pour ce rapport.")
-
-    # Appliquer les corrections selon le checkpoint
-    if body.action == "corrected" and body.corrections:
-        _apply_corrections(state, body.checkpoint, body.corrections)
-
-    # Réinitialiser le flag HITL
-    state["hitl_pending"] = False
-    state["hitl_checkpoint"] = None
-    state["hitl_corrections"] = state.get("hitl_corrections", []) + [
-        {
-            "checkpoint": body.checkpoint,
-            "action": body.action,
-            "corrections": body.corrections,
-        }
-    ]
-    state["status"] = "running"
-
-    await save_report_state(report_id, state)
-
-    # Relancer le pipeline en background avec l'état mis à jour
-    pipeline = _get_pipeline()
-    asyncio.create_task(_run_pipeline(pipeline, state, report_id))
-
-    logger.info("hitl_review_submitted", report_id=report_id, action=body.action)
-    return {"status": "resumed", "report_id": report_id}
-
-
-def _apply_corrections(state: dict, checkpoint: str, corrections: dict) -> None:
-    """Applique les corrections humaines au state selon le checkpoint."""
-    if checkpoint == "cp1_metadata":
-        existing = state.get("metadata", {})
-        existing.update(corrections)
-        state["metadata"] = existing
-    elif checkpoint == "cp2_schema":
-        existing = state.get("schema", {})
-        existing.update(corrections)
-        state["schema"] = existing
-    elif checkpoint == "cp3_insights":
-        if "insights" in corrections:
-            state["insights"] = corrections["insights"]
-    elif checkpoint == "cp4_narrative":
-        if "narrative" in corrections:
-            state["narrative"] = corrections["narrative"]
 
 
 # ── GET /{report_id}/html ─────────────────────────────────────────────────────

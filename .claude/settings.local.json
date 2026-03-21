@@ -29,7 +29,17 @@
       "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/api/ tests/unit/test_metadata_agent.py tests/integration/test_pipeline_skeleton.py -v --tb=short)",
       "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/ --tb=short -q)",
       "Bash(C:/BrxAI/venv/Scripts/pytest.exe tests/api/ tests/unit/ tests/integration/ -q)",
-      "Bash(echo \"EXIT: $?\")"
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(docker compose:*)",
+      "Bash(curl:*)",
+      "Bash(REPORT_ID=\"b6d48a07-8570-4b2c-9fbe-4dacfe9fb410\" echo \"=== Attente 5s ===\" sleep 5 curl -s http://localhost:8000/api/v1/reports/$REPORT_ID)",
+      "Bash(python3 -m json.tool)",
+      "Bash(start \"C:/Users/gbami/OneDrive/Bureau/Projets Data/BrouxAI/report_demo.html\")",
+      "Bash(C:/BrxAI/venv/Scripts/python -m pytest tests/api/test_hitl_api.py tests/api/test_reports_api.py tests/api/test_health.py -v)",
+      "Bash(C:/BrxAI/venv/Scripts/python -m pytest tests/api/ -v)",
+      "Bash(C:/BrxAI/venv/Scripts/python -m pytest tests/integration/test_hitl_flow.py -v)",
+      "Bash(C:/BrxAI/venv/Scripts/python -m pytest tests/ -v)",
+      "Bash(C:/BrxAI/venv/Scripts/ruff check:*)"
     ]
   }
 }

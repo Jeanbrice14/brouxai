@@ -1,11 +1,11 @@
-"""Tests API Sprint 8 — endpoints /api/v1/reports.
+"""Tests API — endpoints /api/v1/reports.
 
 Pipeline, storage et Redis sont mockés.
+POST /{id}/review est testé dans test_hitl_api.py (Sprint 9).
 """
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -159,43 +159,6 @@ async def test_get_unknown_report_returns_404():
             response = await client.get("/api/v1/reports/id-inexistant")
 
     assert response.status_code == 404, f"Réponse: {response.text}"
-
-
-@pytest.mark.asyncio
-async def test_review_endpoint_resumes_pipeline():
-    """POST /{id}/review → hitl_pending False, status 200, status 'resumed'."""
-    from app.main import app
-
-    saved_states: list[dict] = []
-
-    async def _mock_save(report_id: str, state: dict) -> None:
-        saved_states.append(dict(state))
-
-    with (
-        patch("app.api.v1.reports.get_report_state", AsyncMock(return_value=_MOCK_STATE_HITL)),
-        patch("app.api.v1.reports.save_report_state", side_effect=_mock_save),
-        patch("app.api.v1.reports._get_pipeline", return_value=MagicMock(ainvoke=AsyncMock())),
-        patch("asyncio.create_task"),
-    ):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                f"/api/v1/reports/{_MOCK_STATE_HITL['report_id']}/review",
-                content=json.dumps(
-                    {"checkpoint": "cp3_insights", "action": "approved", "corrections": {}}
-                ),
-                headers={"Content-Type": "application/json"},
-            )
-
-    assert response.status_code == 200, f"Réponse: {response.text}"
-    body = response.json()
-    assert body["status"] == "resumed"
-
-    # L'état sauvegardé doit avoir hitl_pending = False
-    assert saved_states, "save_report_state n'a pas été appelé"
-    final_state = saved_states[-1]
-    assert final_state["hitl_pending"] is False, (
-        f"hitl_pending devrait être False après review. State: {final_state}"
-    )
 
 
 @pytest.mark.asyncio
