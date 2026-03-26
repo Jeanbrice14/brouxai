@@ -5,12 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{{ prompt | truncate(80) }} — BrouxAI</title>
 
-  <!-- React + ReactDOM (requis par Recharts) -->
-  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-
-  <!-- Recharts UMD -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.0/Recharts.min.js"></script>
+  <!-- Chart.js — pas de dépendance React, CDN stable -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
   <style>
     /* ── Variables CSS brand_kit ─────────────────────────────── */
@@ -134,6 +130,10 @@
     .chart-container {
       width: 100%;
       height: 280px;
+      position: relative;
+    }
+    .chart-container canvas {
+      display: block;
     }
 
     /* ── Narration ───────────────────────────────────────────── */
@@ -205,7 +205,9 @@
       {% for spec in viz_specs %}
       <div class="chart-card">
         <div class="chart-title">{{ spec.title }}</div>
-        <div class="chart-container" id="chart-{{ loop.index0 }}"></div>
+        <div class="chart-container">
+          <canvas id="chart-{{ loop.index0 }}"></canvas>
+        </div>
       </div>
       {% endfor %}
     </div>
@@ -228,106 +230,125 @@
 
   <!-- ── Données viz injectées côté serveur ─────────────── -->
   <script>
-    window.__VIZ_SPECS__ = {{ viz_specs_json }};
+    window.__VIZ_SPECS__ = {{ viz_specs_json | safe }};
     window.__BRAND_COLORS__ = {
-      primary:  "{{ colors.primary }}",
-      positive: "{{ colors.positive }}",
-      negative: "{{ colors.negative }}"
+      primary:  "{{ colors.primary | safe }}",
+      positive: "{{ colors.positive | safe }}",
+      negative: "{{ colors.negative | safe }}"
     };
   </script>
 
-  <!-- ── Rendu Recharts ──────────────────────────────────── -->
+  <!-- ── Rendu Chart.js ──────────────────────────────────── -->
   <script>
   (function () {
-    if (typeof Recharts === "undefined" || typeof React === "undefined") {
-      console.warn("BrouxAI: Recharts ou React non chargé — graphiques désactivés.");
+    if (typeof Chart === "undefined") {
+      console.warn("BrouxAI: Chart.js non chargé — graphiques désactivés.");
       return;
     }
 
-    var specs = window.__VIZ_SPECS__ || [];
+    var specs  = window.__VIZ_SPECS__ || [];
     var colors = window.__BRAND_COLORS__;
-    var R = Recharts;
-    var h = React.createElement;
 
-    var CHART_HEIGHT = 260;
-    var CHART_MARGIN = { top: 10, right: 20, left: 0, bottom: 30 };
+    var PIE_PALETTE = [
+      colors.primary  || "#1E3A8A",
+      colors.positive || "#16A34A",
+      colors.negative || "#DC2626",
+      "#8B5CF6", "#F59E0B", "#0EA5E9", "#EC4899"
+    ];
 
-    function getChartColors(spec) {
-      var c = (spec.colors || {});
-      return {
-        primary:  c.primary  || colors.primary  || "#1E3A8A",
-        positive: c.positive || colors.positive || "#16A34A",
-        negative: c.negative || colors.negative || "#DC2626",
-      };
+    function getColor(spec) {
+      var c = spec.colors || {};
+      return c.primary || colors.primary || "#1E3A8A";
     }
 
-    function getAggData(spec) {
-      /* Les données sont embarquées dans la spec si disponibles,
-         sinon on retourne un tableau vide (graphique vide gracieux). */
-      return Array.isArray(spec.data) ? spec.data : [];
+    function getLabels(data, key) {
+      return data.map(function(row) { return row[key] !== undefined ? row[key] : ""; });
     }
 
-    function renderBar(container, spec, data, c) {
-      var chart = h(R.ResponsiveContainer, { width: "100%", height: CHART_HEIGHT },
-        h(R.BarChart, { data: data, margin: CHART_MARGIN },
-          h(R.CartesianGrid, { strokeDasharray: "3 3", stroke: "#f0f0f0" }),
-          h(R.XAxis, { dataKey: spec.x, tick: { fontSize: 12 } }),
-          h(R.YAxis, { tick: { fontSize: 12 } }),
-          h(R.Tooltip, {}),
-          h(R.Bar, { dataKey: spec.y, fill: c.primary, radius: [4,4,0,0] })
-        )
-      );
-      ReactDOM.render(chart, container);
+    function getValues(data, key) {
+      return data.map(function(row) { return Number(row[key]) || 0; });
     }
 
-    function renderLine(container, spec, data, c) {
-      var chart = h(R.ResponsiveContainer, { width: "100%", height: CHART_HEIGHT },
-        h(R.LineChart, { data: data, margin: CHART_MARGIN },
-          h(R.CartesianGrid, { strokeDasharray: "3 3", stroke: "#f0f0f0" }),
-          h(R.XAxis, { dataKey: spec.x, tick: { fontSize: 12 } }),
-          h(R.YAxis, { tick: { fontSize: 12 } }),
-          h(R.Tooltip, {}),
-          h(R.Line, { type: "monotone", dataKey: spec.y, stroke: c.primary, strokeWidth: 2, dot: { r: 4 } })
-        )
-      );
-      ReactDOM.render(chart, container);
-    }
-
-    function renderPie(container, spec, data, c) {
-      var pieData = data.map(function(row) {
-        return { name: row[spec.x] || row[spec.y], value: row[spec.y] || 0 };
+    function renderBar(canvas, spec, data) {
+      var color = getColor(spec);
+      new Chart(canvas, {
+        type: "bar",
+        data: {
+          labels: getLabels(data, spec.x),
+          datasets: [{
+            label: spec.y,
+            data: getValues(data, spec.y),
+            backgroundColor: color + "cc",
+            borderColor: color,
+            borderWidth: 1,
+            borderRadius: 4
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true, grid: { color: "#f0f0f0" } }, x: { grid: { display: false } } }
+        }
       });
-      var PIE_COLORS = [c.primary, c.positive, c.negative, "#8B5CF6", "#F59E0B"];
-      var cells = pieData.map(function(_, i) {
-        return h(R.Cell, { key: i, fill: PIE_COLORS[i % PIE_COLORS.length] });
+    }
+
+    function renderLine(canvas, spec, data) {
+      var color = getColor(spec);
+      new Chart(canvas, {
+        type: "line",
+        data: {
+          labels: getLabels(data, spec.x),
+          datasets: [{
+            label: spec.y,
+            data: getValues(data, spec.y),
+            borderColor: color,
+            backgroundColor: color + "22",
+            borderWidth: 2,
+            pointRadius: 4,
+            fill: true,
+            tension: 0.3
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: false, grid: { color: "#f0f0f0" } }, x: { grid: { display: false } } }
+        }
       });
-      var chart = h(R.ResponsiveContainer, { width: "100%", height: CHART_HEIGHT },
-        h(R.PieChart, {},
-          h(R.Pie, { data: pieData, dataKey: "value", nameKey: "name",
-                     cx: "50%", cy: "50%", outerRadius: 100, label: true }, cells),
-          h(R.Tooltip, {}),
-          h(R.Legend, {})
-        )
-      );
-      ReactDOM.render(chart, container);
     }
 
-    function renderScatter(container, spec, data, c) {
-      var chart = h(R.ResponsiveContainer, { width: "100%", height: CHART_HEIGHT },
-        h(R.ScatterChart, { margin: CHART_MARGIN },
-          h(R.CartesianGrid, { strokeDasharray: "3 3", stroke: "#f0f0f0" }),
-          h(R.XAxis, { dataKey: spec.x, type: "number", name: spec.x, tick: { fontSize: 12 } }),
-          h(R.YAxis, { dataKey: spec.y, type: "number", name: spec.y, tick: { fontSize: 12 } }),
-          h(R.Tooltip, { cursor: { strokeDasharray: "3 3" } }),
-          h(R.Scatter, { data: data, fill: c.primary })
-        )
-      );
-      ReactDOM.render(chart, container);
+    function renderPie(canvas, spec, data) {
+      new Chart(canvas, {
+        type: "pie",
+        data: {
+          labels: getLabels(data, spec.x),
+          datasets: [{
+            data: getValues(data, spec.y),
+            backgroundColor: PIE_PALETTE.slice(0, data.length),
+            borderWidth: 1
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { position: "bottom" } }
+        }
+      });
     }
 
-    function renderHistogram(container, spec, data, c) {
-      /* Recharts n'a pas de type "histogram" natif — on utilise un BarChart */
-      renderBar(container, spec, data, c);
+    function renderScatter(canvas, spec, data) {
+      var color = getColor(spec);
+      var points = data.map(function(row) {
+        return { x: Number(row[spec.x]) || 0, y: Number(row[spec.y]) || 0 };
+      });
+      new Chart(canvas, {
+        type: "scatter",
+        data: { datasets: [{ label: spec.title || "", data: points, backgroundColor: color + "99", borderColor: color }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: { x: { grid: { color: "#f0f0f0" } }, y: { grid: { color: "#f0f0f0" } } }
+        }
+      });
     }
 
     var renderers = {
@@ -335,19 +356,22 @@
       line:      renderLine,
       pie:       renderPie,
       scatter:   renderScatter,
-      histogram: renderHistogram,
+      histogram: renderBar
     };
 
     specs.forEach(function(spec, idx) {
-      var container = document.getElementById("chart-" + idx);
-      if (!container) return;
-      var data = getAggData(spec);
-      var c    = getChartColors(spec);
-      var fn   = renderers[spec.chart_type] || renderBar;
+      var canvas = document.getElementById("chart-" + idx);
+      if (!canvas) return;
+      var data = Array.isArray(spec.data) ? spec.data : [];
+      if (data.length === 0) {
+        canvas.parentElement.innerHTML = "<p style='color:#6b7280;font-size:0.85rem;padding:1rem'>Aucune donnée disponible.</p>";
+        return;
+      }
+      var fn = renderers[spec.chart_type] || renderBar;
       try {
-        fn(container, spec, data, c);
+        fn(canvas, spec, data);
       } catch (e) {
-        container.innerHTML = "<p style='color:#6b7280;font-size:0.85rem;padding:1rem'>Graphique non disponible.</p>";
+        canvas.parentElement.innerHTML = "<p style='color:#6b7280;font-size:0.85rem;padding:1rem'>Graphique non disponible.</p>";
         console.error("BrouxAI chart error [" + idx + "]:", e);
       }
     });

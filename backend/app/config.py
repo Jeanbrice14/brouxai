@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Chemin absolu vers le .env (peu importe le répertoire de lancement)
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(_ENV_FILE), extra="ignore")
 
     # LLM
     openai_api_key: str = ""
-    litellm_default_model: str = "gpt-4o"
-    litellm_cheap_model: str = "gpt-4o-mini"
+    litellm_default_model: str = "gpt-5.4"
+    litellm_cheap_model: str = "gpt-5.4-mini"
 
     # Base de données
     database_url: str = "postgresql+asyncpg://narr8:narr8dev@localhost:5432/narr8"

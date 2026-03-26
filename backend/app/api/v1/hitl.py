@@ -78,6 +78,12 @@ async def post_review(report_id: str, body: HITLReviewRequest) -> dict:
             detail="Aucune validation HITL en attente pour ce rapport.",
         )
 
+    # Construire le pipeline de reprise AVANT de réinitialiser le checkpoint
+    try:
+        pipeline = resume_pipeline(report_id, state)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     # Appliquer les corrections selon le checkpoint
     if body.action == "corrected" and body.corrections:
         _apply_corrections(state, body.checkpoint, body.corrections)
@@ -95,12 +101,6 @@ async def post_review(report_id: str, body: HITLReviewRequest) -> dict:
     state["status"] = "running"
 
     await save_report_state(report_id, state)
-
-    # Construire le pipeline de reprise et le lancer en background
-    try:
-        pipeline = resume_pipeline(report_id, state)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     asyncio.create_task(_run_resume(pipeline, state, report_id))
 
@@ -146,10 +146,12 @@ async def delete_review(report_id: str) -> dict:
 async def _run_resume(pipeline, state: dict, report_id: str) -> None:
     """Tâche background : exécute la reprise du pipeline."""
     try:
-        await pipeline.ainvoke(state)
+        final_state = await pipeline.ainvoke(state)
+        if isinstance(final_state, dict):
+            await save_report_state(report_id, final_state)
     except Exception as exc:
         logger.error("resume_pipeline_error", report_id=report_id, error=str(exc))
-        from app.services.report_store import get_report_state, save_report_state
+        from app.services.report_store import get_report_state
 
         current = await get_report_state(report_id) or {}
         current["status"] = "error"

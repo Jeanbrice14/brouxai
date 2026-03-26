@@ -27,7 +27,11 @@ NODE_HITL_WAIT = "hitl_wait"
 
 async def _hitl_wait_node(state: PipelineState) -> PipelineState:
     """Nœud terminal HITL — le pipeline s'arrête ici jusqu'à reprise humaine."""
+    from app.services.report_store import save_report_state
+
     state["status"] = "hitl_required"
+    if state.get("report_id"):
+        await save_report_state(state["report_id"], dict(state))
     return state
 
 

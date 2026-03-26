@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import structlog
 from fastapi import APIRouter, Form, HTTPException, UploadFile
@@ -99,7 +99,10 @@ async def generate_report(
 async def _run_pipeline(pipeline, state: dict, report_id: str) -> None:
     """Tâche background : exécute le pipeline et met à jour Redis."""
     try:
-        await pipeline.ainvoke(state)
+        final_state = await pipeline.ainvoke(state)
+        # Sauvegarder l'état final (hitl_required ou complete non capturés par les agents)
+        if isinstance(final_state, dict):
+            await save_report_state(report_id, final_state)
     except Exception as exc:
         logger.error("pipeline_background_error", report_id=report_id, error=str(exc))
         await _mark_error(report_id, str(exc))
@@ -135,7 +138,7 @@ async def get_report(report_id: str) -> ReportResponse:
         report_id=report_id,
         status=ReportStatus(state.get("status", "pending")),
         prompt=state.get("prompt", ""),
-        created_at=datetime.now(tz=UTC),
+        created_at=datetime.now(tz=timezone.utc),
         report_urls=state.get("report_urls", {}),
         qa_report=state.get("qa_report", {}),
         error=error_str,

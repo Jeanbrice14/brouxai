@@ -215,10 +215,10 @@ class QAAgent(BaseAgent):
         )
 
         # ── Étape D : HITL ───────────────────────────────────────────────────
+        # En v0 : le QA ne déclenche pas de HITL (pas d'UI CP5 dans le frontend).
+        # Le qa_report est toujours disponible dans le state pour information.
         if confidence_score < settings.hitl_confidence_threshold:
-            state["hitl_pending"] = True
-            state["hitl_checkpoint"] = "cp3_insights"
-            log.warning("qa_hitl_triggered", confidence_score=confidence_score)
+            log.warning("qa_low_confidence", confidence_score=confidence_score)
 
         # ── Étape E ──────────────────────────────────────────────────────────
         state["qa_report"] = {

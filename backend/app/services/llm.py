@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 
+import os
+
 import litellm
 import structlog
 
@@ -12,6 +14,10 @@ logger = structlog.get_logger(__name__)
 
 # Désactiver les logs verbeux de litellm
 litellm.suppress_debug_info = True
+
+# Injecter la clé API dans l'environnement pour que LiteLLM la trouve
+if settings.openai_api_key:
+    os.environ["OPENAI_API_KEY"] = settings.openai_api_key
 
 
 async def call_llm(

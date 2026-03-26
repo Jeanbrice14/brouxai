@@ -92,6 +92,9 @@ def _build_code_prompt(user_prompt: str, schema_summary: str, dfs: dict) -> str:
         "Règles :\n"
         "  - `pd` (pandas) et `dfs` sont dans le namespace\n"
         "  - Assigne le résultat à `result` (dict de DataFrames)\n"
+        "  - Chaque valeur de `result` DOIT être un pd.DataFrame avec colonnes nommées\n"
+        "  - Utilise .reset_index() après tout groupby pour que l'index devienne une colonne\n"
+        "  - Ex correct : result = {'ca_par_region': dfs['ventes'].groupby('region')['ca'].sum().reset_index()}\n"
         "  - Uniquement des agrégats — jamais les données brutes\n\n"
         'Retourne : {"code": "...code Python..."}'
     )
@@ -109,9 +112,19 @@ def _serialize_result(raw_result: dict) -> dict:
     aggregates: dict = {}
     for key, value in raw_result.items():
         if isinstance(value, pd.DataFrame):
-            rows = value.head(_MAX_ROWS).to_dict(orient="records")
+            df = value.head(_MAX_ROWS)
+            # Reset index numérique par défaut (0,1,2…) sans l'inclure
+            if isinstance(df.index, pd.RangeIndex):
+                rows = df.to_dict(orient="records")
+            else:
+                # Index nommé (ex: groupby) → le promouvoir en colonne
+                rows = df.reset_index().to_dict(orient="records")
         elif isinstance(value, pd.Series):
-            rows = value.head(_MAX_ROWS).reset_index().to_dict(orient="records")
+            s = value.head(_MAX_ROWS)
+            # Nommer l'index si absent pour éviter la colonne "index" générique
+            if s.index.name is None:
+                s.index.name = key  # utilise la clé d'agrégat comme nom de colonne x
+            rows = s.reset_index().to_dict(orient="records")
         else:
             rows = [{"value": value}]
         aggregates[key] = _clean_records(rows)

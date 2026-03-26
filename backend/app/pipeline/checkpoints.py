@@ -25,7 +25,11 @@ _CHECKPOINT_RESUME_MAP: dict[str, str] = {
 
 
 async def _hitl_wait_node(state: PipelineState) -> PipelineState:
+    from app.services.report_store import save_report_state
+
     state["status"] = "hitl_required"
+    if state.get("report_id"):
+        await save_report_state(state["report_id"], dict(state))
     return state
 
 

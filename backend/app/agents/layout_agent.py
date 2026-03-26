@@ -114,9 +114,20 @@ class LayoutAgent(BaseAgent):
         colors = _extract_colors(brand_kit)
         paragraphs = _split_paragraphs(state.get("narrative", ""))
         viz_specs = state.get("viz_specs", [])
+        aggregates = state.get("aggregates", {})
+
+        # Embarquer les données d'agrégat dans chaque viz_spec (clé "data")
+        # pour que le rendu Recharts côté HTML ait accès aux valeurs réelles.
+        viz_specs_with_data = []
+        for spec in viz_specs:
+            spec_copy = dict(spec)
+            data_key = spec_copy.get("data_key", "")
+            rows = aggregates.get(data_key, [])
+            spec_copy["data"] = rows if isinstance(rows, list) else []
+            viz_specs_with_data.append(spec_copy)
 
         # Sérialisation JSON sûre des viz_specs pour l'injection JS
-        viz_specs_json = json.dumps(viz_specs, ensure_ascii=False)
+        viz_specs_json = json.dumps(viz_specs_with_data, ensure_ascii=False, default=str)
 
         context = {
             "language": language,
@@ -127,7 +138,7 @@ class LayoutAgent(BaseAgent):
             "logo_url": brand_kit.get("logo_url", ""),
             "company_name": brand_kit.get("company_name", ""),
             "paragraphs": paragraphs,
-            "viz_specs": viz_specs,
+            "viz_specs": viz_specs_with_data,
             "viz_specs_json": viz_specs_json,
         }
 
