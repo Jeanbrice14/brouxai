@@ -105,7 +105,9 @@ _BASE_PATCHES = {
     ),
     "app.agents.data_agent.read_dataframe": AsyncMock(return_value=_MOCK_DF),
     "app.agents.data_agent.call_llm_json": AsyncMock(
-        return_value={"code": "result = df.groupby('region')['ca_ht'].sum().reset_index().to_dict('records')"}
+        return_value={
+            "code": "result = df.groupby('region')['ca_ht'].sum().reset_index().to_dict('records')"
+        }
     ),
     "app.agents.data_agent.get_cache": AsyncMock(return_value=_CACHED_AGGREGATES),
     "app.agents.data_agent.set_cache": AsyncMock(),
@@ -123,7 +125,7 @@ def _make_state(**overrides):
         tenant_id="test-tenant",
         user_id="test-user",
         report_id="test-hitl-001",
-        prompt="Analyse les ventes par région pour valider le HITL",
+        prompt="Génère un rapport complet d'analyse pour valider le HITL",
         raw_data_refs=["s3://narr8-dev/test-tenant/datasets/test-hitl-001/ventes.csv"],
         brand_kit={"colors": {"primary": "#1E3A8A"}},
     )
@@ -146,17 +148,42 @@ async def test_pipeline_stops_at_hitl_checkpoint():
     )
 
     with (
-        patch("app.agents.metadata_agent.read_dataframe", patches["app.agents.metadata_agent.read_dataframe"]),
-        patch("app.agents.metadata_agent.call_llm_json", patches["app.agents.metadata_agent.call_llm_json"]),
-        patch("app.agents.schema_linking_agent.read_dataframe", patches["app.agents.schema_linking_agent.read_dataframe"]),
-        patch("app.agents.schema_linking_agent.call_llm_json", patches["app.agents.schema_linking_agent.call_llm_json"]),
-        patch("app.agents.data_agent.read_dataframe", patches["app.agents.data_agent.read_dataframe"]),
-        patch("app.agents.data_agent.call_llm_json", patches["app.agents.data_agent.call_llm_json"]),
+        patch(
+            "app.agents.metadata_agent.read_dataframe",
+            patches["app.agents.metadata_agent.read_dataframe"],
+        ),
+        patch(
+            "app.agents.metadata_agent.call_llm_json",
+            patches["app.agents.metadata_agent.call_llm_json"],
+        ),
+        patch(
+            "app.agents.schema_linking_agent.read_dataframe",
+            patches["app.agents.schema_linking_agent.read_dataframe"],
+        ),
+        patch(
+            "app.agents.schema_linking_agent.call_llm_json",
+            patches["app.agents.schema_linking_agent.call_llm_json"],
+        ),
+        patch(
+            "app.agents.data_agent.read_dataframe", patches["app.agents.data_agent.read_dataframe"]
+        ),
+        patch(
+            "app.agents.data_agent.call_llm_json", patches["app.agents.data_agent.call_llm_json"]
+        ),
         patch("app.agents.data_agent.get_cache", patches["app.agents.data_agent.get_cache"]),
         patch("app.agents.data_agent.set_cache", patches["app.agents.data_agent.set_cache"]),
-        patch("app.agents.insight_agent.call_llm_json", patches["app.agents.insight_agent.call_llm_json"]),
-        patch("app.agents.base_agent.save_report_state", patches["app.agents.base_agent.save_report_state"]),
-        patch("app.agents.base_agent.notify_hitl_required", patches["app.agents.base_agent.notify_hitl_required"]),
+        patch(
+            "app.agents.insight_agent.call_llm_json",
+            patches["app.agents.insight_agent.call_llm_json"],
+        ),
+        patch(
+            "app.agents.base_agent.save_report_state",
+            patches["app.agents.base_agent.save_report_state"],
+        ),
+        patch(
+            "app.agents.base_agent.notify_hitl_required",
+            patches["app.agents.base_agent.notify_hitl_required"],
+        ),
     ):
         pipeline = build_pipeline()
         result = await pipeline.ainvoke(state)
@@ -189,7 +216,10 @@ async def test_resume_pipeline_cp3_completes_report():
 
     with (
         patch("app.agents.storytelling_agent.call_llm", AsyncMock(return_value=_LONG_NARRATIVE)),
-        patch("app.agents.viz_agent.call_llm_json", AsyncMock(return_value={"viz_specs": [_MOCK_VIZ_SPEC]})),
+        patch(
+            "app.agents.viz_agent.call_llm_json",
+            AsyncMock(return_value={"viz_specs": [_MOCK_VIZ_SPEC]}),
+        ),
         patch("app.agents.qa_agent.call_llm_json", AsyncMock(return_value=_MOCK_QA_LLM_RESPONSE)),
         patch("app.agents.layout_agent.upload_file", AsyncMock()),
         patch("app.agents.base_agent.save_report_state", AsyncMock()),

@@ -34,6 +34,18 @@ class PipelineState(TypedDict):
     errors: list[str]
     current_agent: str
 
+    # Intent & response mode
+    intent: str  # "simple_query" | "chart_request" | "full_report"
+    intent_confidence: float
+    response_type: str  # "table" | "chart" | "report"
+
+    # Session & chat
+    session_id: str
+    chat_history: list[dict]
+
+    # Formatted response (populated by LayoutAgent / ResponseFormatter)
+    response: dict
+
 
 def initial_state(
     tenant_id: str,
@@ -65,4 +77,10 @@ def initial_state(
         status="pending",
         errors=[],
         current_agent="",
+        intent="",
+        intent_confidence=0.0,
+        response_type="report",
+        session_id="",
+        chat_history=[],
+        response={},
     )

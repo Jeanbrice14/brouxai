@@ -82,18 +82,10 @@ def _build_html_url(tenant_id: str, report_id: str) -> str:
 
 
 class LayoutAgent(BaseAgent):
-    """Agent 8 — Assemble le rendu HTML interactif final.
+    """Agent 8 — Assemble le rendu final selon response_type.
 
-    Étapes :
-        A. Préparer le contexte template (couleurs, date, paragraphes, viz_specs JSON).
-        B. Rendre le template Jinja2 report.html.j2.
-        C. Stocker le HTML dans MinIO : {tenant_id}/reports/{report_id}/report.html
-        D. Écrire state["report_urls"] = {"html_url": ...} et state["status"] = "complete".
-
-    Input  : state["narrative"] + state["viz_specs"] + state["aggregates"] + state["brand_kit"]
-    Output : state["report_urls"]  — {html_url} stocké dans MinIO/R2
-    Outils : Jinja2 (templates HTML), Recharts (rendu frontend interactif)
-    V0     : HTML uniquement — export PDF reporté v1
+    Mode "table" ou "chart" : pas d'HTML — appelle response_formatter directement.
+    Mode "report" : comportement original — génère HTML complet + upload MinIO.
     """
 
     name = "layout_agent"
@@ -105,19 +97,39 @@ class LayoutAgent(BaseAgent):
         )
 
     async def run(self, state: PipelineState) -> PipelineState:
-        log = logger.bind(report_id=state.get("report_id"))
+        from app.agents.response_formatter import (
+            format_chart_response,
+            format_report_response,
+            format_table_response,
+        )
 
+        log = logger.bind(report_id=state.get("report_id"))
+        response_type = state.get("response_type", "report")
+
+        # ── Mode simple (table ou chart) ─────────────────────────────────────
+        if response_type == "table":
+            state["response"] = format_table_response(state)
+            state["report_urls"] = {}
+            state["status"] = "complete"
+            log.info("layout_simple_complete", response_type="table")
+            return state
+
+        if response_type == "chart":
+            state["response"] = format_chart_response(state)
+            state["report_urls"] = {}
+            state["status"] = "complete"
+            log.info("layout_simple_complete", response_type="chart")
+            return state
+
+        # ── Mode rapport complet ──────────────────────────────────────────────
         brand_kit = state.get("brand_kit", {})
         language = brand_kit.get("language", "fr")
 
-        # ── Étape A : contexte template ──────────────────────────────────────
         colors = _extract_colors(brand_kit)
         paragraphs = _split_paragraphs(state.get("narrative", ""))
         viz_specs = state.get("viz_specs", [])
         aggregates = state.get("aggregates", {})
 
-        # Embarquer les données d'agrégat dans chaque viz_spec (clé "data")
-        # pour que le rendu Recharts côté HTML ait accès aux valeurs réelles.
         viz_specs_with_data = []
         for spec in viz_specs:
             spec_copy = dict(spec)
@@ -126,7 +138,6 @@ class LayoutAgent(BaseAgent):
             spec_copy["data"] = rows if isinstance(rows, list) else []
             viz_specs_with_data.append(spec_copy)
 
-        # Sérialisation JSON sûre des viz_specs pour l'injection JS
         viz_specs_json = json.dumps(viz_specs_with_data, ensure_ascii=False, default=str)
 
         context = {
@@ -142,25 +153,21 @@ class LayoutAgent(BaseAgent):
             "viz_specs_json": viz_specs_json,
         }
 
-        # ── Étape B : rendu Jinja2 ───────────────────────────────────────────
         template = self._jinja_env.get_template("report.html.j2")
         html_content = template.render(**context)
 
         log.info("layout_html_rendered", size=len(html_content), paragraphs=len(paragraphs))
 
-        # ── Étape C : stockage MinIO ─────────────────────────────────────────
         tenant_id = state.get("tenant_id", "")
         report_id = state.get("report_id", "")
-
         ref = _build_report_ref(tenant_id, report_id)
         html_bytes = html_content.encode("utf-8")
-
         await upload_file(ref, html_bytes, content_type="text/html; charset=utf-8")
 
         html_url = _build_html_url(tenant_id, report_id)
         log.info("layout_uploaded", html_url=html_url)
 
-        # ── Étape D : état final ─────────────────────────────────────────────
         state["report_urls"] = {"html_url": html_url}
+        state["response"] = format_report_response(state)
         state["status"] = "complete"
         return state

@@ -100,7 +100,7 @@ def sample_state():
         tenant_id="tenant-001",
         user_id="user-001",
         report_id="report-001",
-        prompt="Analyse les ventes par région pour Q3 2024",
+        prompt="Génère un rapport complet d'analyse des ventes pour Q3 2024",
         raw_data_refs=["s3://narr8-dev/uploads/sales_q3.csv"],
         brand_kit={"colors": {"primary": "#1E3A8A"}, "tone": "formel"},
     )
@@ -208,9 +208,15 @@ async def test_metadata_agent_wrote_state(pipeline, sample_state):
 
 @pytest.mark.asyncio
 async def test_schema_agent_wrote_state(pipeline, sample_state):
-    """SchemaLinkingAgent a écrit dans state['schema']."""
+    """SchemaLinkingAgent a écrit dans state['schema'] avec les nouveaux champs."""
     result = await pipeline.ainvoke(sample_state)
     assert result["schema"] != {}, "schema est vide — SchemaLinkingAgent n'a pas écrit"
+    # Nouveaux champs introduits par le refactor star schema
+    schema = result["schema"]
+    assert "table_types" in schema, "table_types manquant dans schema"
+    assert "auto_generated_tables" in schema, "auto_generated_tables manquant dans schema"
+    assert "warnings" in schema, "warnings manquant dans schema"
+    assert "schema_type" in schema, "schema_type manquant dans schema"
 
 
 @pytest.mark.asyncio

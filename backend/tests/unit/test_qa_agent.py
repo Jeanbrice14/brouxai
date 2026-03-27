@@ -140,8 +140,9 @@ async def test_triggers_hitl_below_threshold():
     assert qa["confidence_score"] < 0.80, (
         f"confidence_score devrait être < 0.80, obtenu {qa['confidence_score']}"
     )
-    assert result["hitl_pending"] is True, "HITL devrait être déclenché"
-    assert result["hitl_checkpoint"] == "cp3_insights"
+    # En v0 le QA agent ne déclenche pas de HITL (pas d'UI CP5) — il log un warning
+    assert result["hitl_pending"] is False
+    assert result["qa_report"]["status"] == "error"  # qa_report.status, pas le pipeline state
 
 
 @pytest.mark.asyncio

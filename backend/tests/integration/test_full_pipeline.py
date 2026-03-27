@@ -87,7 +87,7 @@ def full_state():
         tenant_id="tenant-001",
         user_id="user-001",
         report_id="report-001",
-        prompt="Analyse les ventes par région pour Q1 2024",
+        prompt="Génère un rapport complet d'analyse des ventes pour Q1 2024",
         raw_data_refs=["s3://narr8-dev/uploads/ventes_q1.csv"],
         brand_kit={
             "colors": {"primary": "#1E3A8A", "positive": "#16A34A", "negative": "#DC2626"},

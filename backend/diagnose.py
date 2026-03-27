@@ -2,10 +2,10 @@
 
 Lance via : python diagnose.py  (dans le dossier backend, avec le venv activé)
 """
+
 from __future__ import annotations
 
 import asyncio
-import io
 import sys
 
 
@@ -13,6 +13,7 @@ async def check_redis():
     print("\n=== Redis ===")
     try:
         import redis.asyncio as aioredis
+
         client = aioredis.from_url("redis://localhost:6379/0", decode_responses=True)
         pong = await client.ping()
         print(f"  ✓ Redis OK — ping={pong}")
@@ -27,6 +28,7 @@ async def check_minio():
     print("\n=== MinIO / Storage ===")
     try:
         import asyncio
+
         import boto3
 
         def _ping():
@@ -46,8 +48,10 @@ async def check_minio():
 
         if "narr8-dev" not in buckets:
             print("  ! Bucket 'narr8-dev' n'existe pas → création...")
+
             def _create():
                 import boto3
+
                 client = boto3.client(
                     "s3",
                     endpoint_url="http://localhost:9000",
@@ -57,6 +61,7 @@ async def check_minio():
                 )
                 client.create_bucket(Bucket="narr8-dev")
                 print("  ✓ Bucket 'narr8-dev' créé !")
+
             await asyncio.to_thread(_create)
         else:
             print("  ✓ Bucket 'narr8-dev' existe")
@@ -71,6 +76,7 @@ async def check_llm():
     print("\n=== LLM (OpenAI) ===")
     try:
         import litellm
+
         litellm.suppress_debug_info = True
         response = await litellm.acompletion(
             model="gpt-4o-mini",
@@ -88,9 +94,8 @@ async def check_llm():
 async def check_upload_and_metadata():
     print("\n=== Upload + MetadataAgent ===")
     try:
-        import pandas as pd
-        import sys
         import os
+        import sys
 
         # Ajouter le dossier courant au path
         sys.path.insert(0, os.path.dirname(__file__))
@@ -98,7 +103,7 @@ async def check_upload_and_metadata():
         # Charger les settings
         os.chdir(os.path.dirname(__file__) or ".")
 
-        from app.services.storage import upload_file, read_dataframe
+        from app.services.storage import read_dataframe, upload_file
 
         # Créer un CSV de test
         csv_content = b"region,ca,segment\nNord,150000,B2B\nSud,120000,B2C\nEst,90000,B2B\n"
@@ -132,15 +137,20 @@ async def check_upload_and_metadata():
             print(f"  ✗ MetadataAgent ERREUR : {result.get('errors')}")
             return False
         else:
-            print(f"  ✓ MetadataAgent OK — status={result['status']}, hitl={result.get('hitl_pending')}")
+            print(
+                f"  ✓ MetadataAgent OK — status={result['status']}, hitl={result.get('hitl_pending')}"
+            )
             if result.get("metadata"):
                 files = result["metadata"].get("files", {})
                 for fref, fmeta in files.items():
-                    print(f"    - {fref}: {fmeta['row_count']} lignes, avg_confidence={fmeta['avg_confidence']}")
+                    print(
+                        f"    - {fref}: {fmeta['row_count']} lignes, avg_confidence={fmeta['avg_confidence']}"
+                    )
             return True
 
     except Exception as e:
         import traceback
+
         print(f"  ✗ ERREUR : {e}")
         traceback.print_exc()
         return False
@@ -149,7 +159,9 @@ async def check_upload_and_metadata():
 async def check_full_pipeline():
     print("\n=== Pipeline complet (test rapide) ===")
     try:
-        import os, sys
+        import os
+        import sys
+
         sys.path.insert(0, os.path.dirname(__file__) or ".")
         os.chdir(os.path.dirname(__file__) or ".")
 
@@ -192,6 +204,7 @@ async def check_full_pipeline():
 
     except Exception as e:
         import traceback
+
         print(f"  ✗ ERREUR : {e}")
         traceback.print_exc()
         return False
@@ -202,7 +215,8 @@ async def main():
     print("BrouxAI — Diagnostic pipeline")
     print("=" * 60)
 
-    import os, sys
+    import os
+
     sys.path.insert(0, os.path.dirname(__file__) or ".")
     os.chdir(os.path.dirname(__file__) or ".")
 

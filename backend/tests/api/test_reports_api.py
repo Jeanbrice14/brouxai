@@ -7,11 +7,13 @@ POST /{id}/review est testé dans test_hitl_api.py (Sprint 9).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+UTC = timezone.utc
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

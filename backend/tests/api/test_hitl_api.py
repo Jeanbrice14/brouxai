@@ -29,9 +29,7 @@ _MOCK_STATE_HITL = {
     "metadata": {"columns": [{"name": "ca_ht", "type": "float"}]},
     "schema": {},
     "aggregates": {"by_region": [{"region": "Nord", "ca_ht": 12500}]},
-    "insights": [
-        {"title": "Croissance Nord", "description": "CA Nord +23%", "confidence": 0.90}
-    ],
+    "insights": [{"title": "Croissance Nord", "description": "CA Nord +23%", "confidence": 0.90}],
     "narrative": "Les ventes ont progressé de 23% en région Nord.",
     "viz_specs": [],
     "qa_report": {},
@@ -55,7 +53,9 @@ async def test_get_review_returns_checkpoint_data():
     """GET /review → 200 avec checkpoint et data contextuels."""
     from app.main import app
 
-    with patch("app.api.v1.hitl.get_report_state", AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_HITL))):
+    with patch(
+        "app.api.v1.hitl.get_report_state", AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_HITL))
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.get(f"/api/v1/reports/{_MOCK_STATE_HITL['report_id']}/review")
 
@@ -87,9 +87,14 @@ async def test_get_review_returns_409_when_no_hitl_pending():
     """GET /review → 409 si aucun HITL en attente."""
     from app.main import app
 
-    with patch("app.api.v1.hitl.get_report_state", AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_NO_HITL))):
+    with patch(
+        "app.api.v1.hitl.get_report_state",
+        AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_NO_HITL)),
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.get(f"/api/v1/reports/{_MOCK_STATE_NO_HITL['report_id']}/review")
+            response = await client.get(
+                f"/api/v1/reports/{_MOCK_STATE_NO_HITL['report_id']}/review"
+            )
 
     assert response.status_code == 409, f"Réponse: {response.text}"
 
@@ -115,7 +120,10 @@ async def test_post_review_approved_resumes_pipeline():
     mock_pipeline.ainvoke = AsyncMock(return_value={})
 
     with (
-        patch("app.api.v1.hitl.get_report_state", AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_HITL))),
+        patch(
+            "app.api.v1.hitl.get_report_state",
+            AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_HITL)),
+        ),
         patch("app.api.v1.hitl.save_report_state", side_effect=_mock_save),
         patch("app.api.v1.hitl.resume_pipeline", return_value=mock_pipeline),
         patch("app.api.v1.hitl.asyncio.create_task", side_effect=_fake_create_task),
@@ -160,7 +168,10 @@ async def test_post_review_corrected_applies_corrections():
     new_insights = [{"title": "Nouveau insight", "description": "Corrigé", "confidence": 0.95}]
 
     with (
-        patch("app.api.v1.hitl.get_report_state", AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_HITL))),
+        patch(
+            "app.api.v1.hitl.get_report_state",
+            AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_HITL)),
+        ),
         patch("app.api.v1.hitl.save_report_state", side_effect=_mock_save),
         patch("app.api.v1.hitl.resume_pipeline", return_value=mock_pipeline),
         patch("app.api.v1.hitl.asyncio.create_task", side_effect=_fake_create_task),
@@ -201,7 +212,10 @@ async def test_delete_review_rejects_report():
         saved_states.append(dict(state))
 
     with (
-        patch("app.api.v1.hitl.get_report_state", AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_HITL))),
+        patch(
+            "app.api.v1.hitl.get_report_state",
+            AsyncMock(return_value=copy.deepcopy(_MOCK_STATE_HITL)),
+        ),
         patch("app.api.v1.hitl.save_report_state", side_effect=_mock_save),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

@@ -103,17 +103,13 @@ def _word_count(text: str) -> int:
 class StorytellingAgent(BaseAgent):
     """Agent 5 — Construit la narration data-driven structurée.
 
-    Étapes :
-        A. Récupération du contexte narratif depuis brand_kit (ton, langue, template).
-        B. Construction du prompt narratif avec les insights.
-        C. Post-traitement : nettoyage Markdown + vérification longueur (200-2000 mots).
-           Re-génération unique si < 200 mots.
-        D. Écriture dans state["narrative"].
+    3 modes selon state["response_type"] :
+    - "table"  : UNE seule phrase de synthèse (max 20 mots)
+    - "chart"  : 2-3 phrases (tendance principale + point notable)
+    - "report" : 4 sections complètes (comportement existant)
 
-    Input  : state["insights"] + state["brand_kit"]
+    Input  : state["insights"] + state["brand_kit"] + state["response_type"]
     Output : state["narrative"]
-    Modèle : settings.litellm_default_model (gpt-4o), temperature=0.3
-    Règle  : ne jamais inventer de chiffres — texte pur sans Markdown
     """
 
     name = "storytelling_agent"
@@ -121,19 +117,61 @@ class StorytellingAgent(BaseAgent):
     async def run(self, state: PipelineState) -> PipelineState:
         log = logger.bind(report_id=state.get("report_id"))
         brand_kit = state.get("brand_kit", {})
+        response_type = state.get("response_type", "report")
 
-        # ── Étape A : contexte narratif ──────────────────────────────────────
         tone = brand_kit.get("tone", "formel")
         language = brand_kit.get("language", "fr")
         template = brand_kit.get("narrative_template")
-
-        # ── Étape B : prompt narratif ────────────────────────────────────────
         insights = state.get("insights", [])
+
+        # ── Mode "table" : 1 seule phrase ────────────────────────────────────
+        if response_type == "table":
+            prompt_text = (
+                f"Données : {state.get('prompt', '')}\n"
+                f"Insights : {_format_insights_for_prompt(insights[:2])}\n\n"
+                "Rédige UNE SEULE phrase de synthèse (maximum 20 mots). "
+                "Commence directement par la phrase, sans titre ni liste."
+            )
+            narrative = await call_llm(
+                prompt=prompt_text,
+                system="Tu rédiges UNE seule phrase factuelle et concise. Texte pur, sans Markdown.",
+                model=settings.litellm_cheap_model,
+                temperature=0.2,
+            )
+            narrative = _strip_markdown(narrative)
+            # Garantir strictement 1 phrase
+            sentences = [s.strip() for s in narrative.replace("\n", " ").split(".") if s.strip()]
+            narrative = (sentences[0] + ".") if sentences else narrative[:120]
+            log.info("storytelling_complete", mode="table", words=_word_count(narrative))
+            state["narrative"] = narrative
+            return state
+
+        # ── Mode "chart" : 2-3 phrases ───────────────────────────────────────
+        if response_type == "chart":
+            prompt_text = (
+                f"Données : {state.get('prompt', '')}\n"
+                f"Insights : {_format_insights_for_prompt(insights[:3])}\n\n"
+                "Rédige 2 à 3 phrases maximum décrivant la tendance principale "
+                "et un point notable. Commence directement, sans titre ni liste."
+            )
+            narrative = await call_llm(
+                prompt=prompt_text,
+                system="Tu rédiges 2-3 phrases factuelles et concises. Texte pur, sans Markdown.",
+                model=settings.litellm_cheap_model,
+                temperature=0.2,
+            )
+            narrative = _strip_markdown(narrative)
+            # Tronquer à 3 phrases max
+            sentences = [s.strip() for s in narrative.replace("\n", " ").split(".") if s.strip()]
+            narrative = ". ".join(sentences[:3]) + ("." if sentences[:3] else "")
+            log.info("storytelling_complete", mode="chart", words=_word_count(narrative))
+            state["narrative"] = narrative
+            return state
+
+        # ── Mode "report" : comportement complet original ─────────────────────
         narrative_prompt = _build_narrative_prompt(
             state["prompt"], insights, tone, language, template
         )
-
-        # ── Étape C : génération + post-traitement ───────────────────────────
         narrative = await call_llm(
             prompt=narrative_prompt,
             system=_NARRATIVE_SYSTEM_PROMPT,
@@ -142,13 +180,8 @@ class StorytellingAgent(BaseAgent):
         )
         narrative = _strip_markdown(narrative)
 
-        # Re-générer une fois si trop court
         if _word_count(narrative) < _MIN_WORDS:
-            log.warning(
-                "storytelling_narrative_too_short",
-                words=_word_count(narrative),
-                threshold=_MIN_WORDS,
-            )
+            log.warning("storytelling_narrative_too_short", words=_word_count(narrative))
             enriched = _build_enriched_prompt(narrative_prompt, narrative)
             narrative = await call_llm(
                 prompt=enriched,
@@ -158,9 +191,6 @@ class StorytellingAgent(BaseAgent):
             )
             narrative = _strip_markdown(narrative)
 
-        words = _word_count(narrative)
-        log.info("storytelling_complete", words=words)
-
-        # ── Étape D ──────────────────────────────────────────────────────────
+        log.info("storytelling_complete", mode="report", words=_word_count(narrative))
         state["narrative"] = narrative
         return state
