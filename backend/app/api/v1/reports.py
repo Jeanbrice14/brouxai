@@ -50,8 +50,8 @@ async def generate_report(
     - Retourne immédiatement {"report_id": ..., "status": "running", "session_id": ...}
     """
     # Validation prompt longueur
-    if len(prompt.strip()) < 10:
-        raise HTTPException(status_code=422, detail="Le prompt doit faire au moins 10 caractères.")
+    if len(prompt.strip()) < 5:
+        raise HTTPException(status_code=422, detail="Le prompt doit faire au moins 5 caractères.")
     if len(prompt.strip()) > 500:
         raise HTTPException(
             status_code=422, detail="Le prompt ne doit pas dépasser 500 caractères."
@@ -75,7 +75,14 @@ async def generate_report(
             filename = upload.filename or f"file_{uuid.uuid4().hex}"
             ref = f"s3://{_storage_bucket()}/{_tenant_id}/datasets/{report_id}/{filename}"
             data = await upload.read()
-            await upload_file(ref, data, content_type=upload.content_type or "application/octet-stream")
+            try:
+                await upload_file(ref, data, content_type=upload.content_type or "application/octet-stream")
+            except Exception as exc:
+                logger.error("file_upload_failed", filename=filename, error=str(exc))
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Impossible d'uploader '{filename}' : stockage indisponible. Vérifiez que les services Docker sont démarrés.",
+                ) from exc
             raw_data_refs.append(ref)
 
     # Fallback : refs passées explicitement (session sans re-upload)
@@ -138,7 +145,6 @@ async def _run_pipeline(pipeline, state: dict, report_id: str) -> None:
     """Tâche background : exécute le pipeline et met à jour Redis."""
     try:
         final_state = await pipeline.ainvoke(state)
-        # Sauvegarder l'état final (hitl_required ou complete non capturés par les agents)
         if isinstance(final_state, dict):
             await save_report_state(report_id, final_state)
     except Exception as exc:
