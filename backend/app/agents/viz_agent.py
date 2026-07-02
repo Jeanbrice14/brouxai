@@ -182,6 +182,39 @@ class VizAgent(BaseAgent):
             spec = _apply_colors(spec, colors)
             viz_specs.append(spec)
 
-        log.info("viz_specs_generated", count=len(viz_specs))
+        # ── Fallback : générer des specs directement depuis les agrégats si aucun insight ──
+        if not viz_specs and aggregates:
+            for key, rows in aggregates.items():
+                if len(viz_specs) >= _MAX_VIZ_SPECS:
+                    break
+                if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+                    continue
+                cols = list(rows[0].keys())
+                numeric_cols = [
+                    c for c in cols
+                    if isinstance(rows[0].get(c), (int, float)) and rows[0].get(c) is not None
+                ]
+                str_cols = [c for c in cols if c not in numeric_cols]
+                if not numeric_cols:
+                    continue
+                x_col = str_cols[0] if str_cols else cols[0]
+                y_col = numeric_cols[0]
+                is_temporal = any(
+                    t in c.lower() for c in cols for t in ("mois", "date", "month", "semaine", "year")
+                )
+                chart_type = "line" if is_temporal and len(rows) > 2 else "bar"
+                spec = _apply_colors({
+                    "chart_type": chart_type,
+                    "title": key.replace("_", " ").strip().capitalize(),
+                    "data_key": key,
+                    "x": x_col,
+                    "y": y_col,
+                    "color_by": None,
+                    "annotations": [],
+                }, colors)
+                viz_specs.append(spec)
+                log.info("viz_spec_fallback_generated", key=key, chart_type=chart_type)
+
+        log.info("viz_specs_generated", count=len(viz_specs), fallback_ran=not insights and bool(aggregates))
         state["viz_specs"] = viz_specs
         return state

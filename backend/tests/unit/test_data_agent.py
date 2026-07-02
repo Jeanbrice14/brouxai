@@ -1,4 +1,4 @@
-"""Tests unitaires Sprint 4 — DataAgent complet.
+"""Tests unitaires Sprint 4 — DataAgent (SQL/DuckDB).
 
 LLM, storage et cache sont systématiquement mockés (aucun appel réseau réel).
 """
@@ -31,12 +31,18 @@ DF_VENTES = pd.DataFrame(
 # Valeurs brutes du CSV que le LLM NE doit PAS voir
 _RAW_VALUES = ["12500", "8750", "CLI001", "CLI002", "CLI003"]
 
-# Code simple que le mock LLM retourne (résultat 1 ligne → toujours < 500)
-_SIMPLE_CODE = "result = {'summary': pd.DataFrame({'metric': ['count'], 'value': [len(dfs[list(dfs.keys())[0]])]})}"
-# Code qui crée un DataFrame de 1000 lignes
-_BIG_CODE = "result = {'big_table': pd.DataFrame({'val': range(1000)})}"
-# Code invalide → NameError
-_BROKEN_CODE = "result = undefined_variable_that_does_not_exist"
+# Réponses LLM mockées (format DuckDB SQL)
+_SIMPLE_LLM_RESPONSE = {
+    "queries": [{"key": "summary", "sql": "SELECT COUNT(*) AS count FROM ventes"}]
+}
+# range(1000) est une table-function DuckDB — génère 1000 lignes sans données sources
+_BIG_LLM_RESPONSE = {
+    "queries": [{"key": "big_table", "sql": "SELECT * FROM range(1000)"}]
+}
+# Table inexistante → DuckDB lève une exception → déclenchement du fallback
+_BROKEN_LLM_RESPONSE = {
+    "queries": [{"key": "broken", "sql": "SELECT * FROM table_inexistante_xyz"}]
+}
 
 
 def _make_state(refs: list[str] | None = None) -> dict:
@@ -53,7 +59,7 @@ def _make_state(refs: list[str] | None = None) -> dict:
 def _patch_all(
     *,
     df: pd.DataFrame = DF_VENTES,
-    llm_code: str = _SIMPLE_CODE,
+    llm_response: dict = _SIMPLE_LLM_RESPONSE,
     cached: dict | None = None,
 ):
     """Context manager qui mocke les 4 dépendances externes du DataAgent."""
@@ -61,7 +67,7 @@ def _patch_all(
         patch("app.agents.data_agent.read_dataframe", AsyncMock(return_value=df)),
         patch(
             "app.agents.data_agent.call_llm_json",
-            AsyncMock(return_value={"code": llm_code}),
+            AsyncMock(return_value=llm_response),
         ),
         patch("app.agents.data_agent.get_cache", AsyncMock(return_value=cached)),
         patch("app.agents.data_agent.set_cache", AsyncMock()),
@@ -78,7 +84,7 @@ async def test_nominal_generates_aggregates():
     state = _make_state()
     agent = DataAgent()
 
-    with _patch_all(df=DF_VENTES, llm_code=_SIMPLE_CODE, cached=None):
+    with _patch_all(df=DF_VENTES, llm_response=_SIMPLE_LLM_RESPONSE, cached=None):
         result = await agent(state)
 
     assert result["status"] != "error", f"Erreurs inattendues: {result['errors']}"
@@ -98,8 +104,7 @@ async def test_never_passes_raw_data_to_llm():
     state = _make_state()
     agent = DataAgent()
 
-    # Capturer le prompt envoyé au LLM
-    mock_llm = AsyncMock(return_value={"code": "result = {}"})
+    mock_llm = AsyncMock(return_value={"queries": []})
 
     with (
         patch("app.agents.data_agent.read_dataframe", AsyncMock(return_value=DF_VENTES)),
@@ -119,18 +124,18 @@ async def test_never_passes_raw_data_to_llm():
             f"Valeur brute '{raw_val}' trouvée dans le prompt LLM — règle violée !"
         )
 
-    # Vérifier que le schéma structurel est présent (noms de colonnes)
+    # Vérifier que le schéma structurel est présent (noms de colonnes et de tables)
     assert "ca_ht" in prompt_sent, "Le nom de colonne 'ca_ht' devrait être dans le prompt"
     assert "ventes" in prompt_sent, "Le nom de table 'ventes' devrait être dans le prompt"
 
 
 @pytest.mark.asyncio
 async def test_exec_failure_triggers_fallback():
-    """Code invalide → pas de crash, fallback basique, warning dans errors."""
+    """SQL invalide → pas de crash, fallback basique, warning dans errors."""
     state = _make_state()
     agent = DataAgent()
 
-    with _patch_all(df=DF_VENTES, llm_code=_BROKEN_CODE, cached=None):
+    with _patch_all(df=DF_VENTES, llm_response=_BROKEN_LLM_RESPONSE, cached=None):
         result = await agent(state)
 
     # Le pipeline ne doit pas planter
@@ -147,8 +152,8 @@ async def test_exec_failure_triggers_fallback():
     # Un warning doit être enregistré dans errors
     assert result["errors"], "state['errors'] devrait contenir au moins un warning"
     errors_str = " ".join(result["errors"])
-    assert "fallback" in errors_str.lower() or "exec" in errors_str.lower(), (
-        f"Aucun warning fallback/exec dans errors: {result['errors']}"
+    assert "fallback" in errors_str.lower() or "sql" in errors_str.lower(), (
+        f"Aucun warning fallback/sql dans errors: {result['errors']}"
     )
 
 
@@ -159,7 +164,7 @@ async def test_cache_hit_skips_llm():
     state = _make_state()
     agent = DataAgent()
 
-    mock_llm = AsyncMock(return_value={"code": _SIMPLE_CODE})
+    mock_llm = AsyncMock(return_value={"queries": []})
 
     with (
         patch("app.agents.data_agent.read_dataframe", AsyncMock(return_value=DF_VENTES)),
@@ -178,11 +183,12 @@ async def test_cache_hit_skips_llm():
 
 @pytest.mark.asyncio
 async def test_result_limited_to_500_rows():
-    """Un DataFrame de 1000 lignes est limité à 500 lignes dans les agrégats."""
+    """Un résultat de 1000 lignes est limité à 500 lignes dans les agrégats."""
     state = _make_state()
     agent = DataAgent()
 
-    with _patch_all(df=DF_VENTES, llm_code=_BIG_CODE, cached=None):
+    # range(1000) est une table-function DuckDB valide, sans besoin de la table ventes
+    with _patch_all(df=DF_VENTES, llm_response=_BIG_LLM_RESPONSE, cached=None):
         result = await agent(state)
 
     aggregates = result["aggregates"]

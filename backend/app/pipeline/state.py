@@ -19,7 +19,8 @@ class PipelineState(TypedDict):
     schema: dict  # → Schema Linking Agent
     aggregates: dict  # → Data Agent
     insights: list[dict]  # → Insight Agent
-    narrative: str  # → Storytelling Agent
+    narrative: str  # → Storytelling Agent (résumé exécutif 2 phrases)
+    recommendations: list[str]  # → Storytelling Agent (1-2 actions concrètes)
     viz_specs: list[dict]  # → Viz Agent (specs JSON)
     qa_report: dict  # → QA Agent
     report_urls: dict  # → Layout Agent (html_url uniquement en v0)
@@ -68,6 +69,7 @@ def initial_state(
         aggregates={},
         insights=[],
         narrative="",
+        recommendations=[],
         viz_specs=[],
         qa_report={},
         report_urls={},

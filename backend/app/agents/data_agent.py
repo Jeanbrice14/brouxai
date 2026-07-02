@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from urllib.parse import urlparse
 
+import duckdb
 import pandas as pd
 import structlog
 
@@ -19,10 +20,12 @@ logger = structlog.get_logger(__name__)
 _MAX_ROWS = 500
 _EXEC_TIMEOUT = 30.0
 
-_CODE_SYSTEM_PROMPT = (
-    "Tu es un expert Python/pandas. "
-    "Génère du code pandas court et correct. "
-    "Retourne UNIQUEMENT du JSON valide avec une clé 'code'."
+_SQL_SYSTEM_PROMPT = (
+    "Tu es un expert SQL. "
+    "Génère des requêtes SQL courtes et correctes pour DuckDB. "
+    "Les tables sont enregistrées par leur nom de fichier (sans extension). "
+    "Retourne UNIQUEMENT du JSON valide avec une clé 'queries' : "
+    "liste d'objets {\"key\": \"nom_agrégat\", \"sql\": \"SELECT ...\"}."
 )
 
 
@@ -42,13 +45,12 @@ def _build_schema_summary(state: PipelineState, dfs: dict[str, pd.DataFrame]) ->
     lines: list[str] = []
     files_meta = state.get("metadata", {}).get("files", {})
 
-    for table_name, df in dfs.items():
-        lines.append(f"Table: {table_name} ({len(df)} lignes, {len(df.columns)} colonnes)")
+    for tname, df in dfs.items():
+        lines.append(f"Table: {tname} ({len(df)} lignes, {len(df.columns)} colonnes)")
 
-        # Retrouver les métadonnées de ce fichier par correspondance de nom
         meta_info: dict = {}
         for ref, meta in files_meta.items():
-            if _table_name(ref) == table_name:
+            if _table_name(ref) == tname:
                 meta_info = meta
                 break
 
@@ -71,60 +73,118 @@ def _build_schema_summary(state: PipelineState, dfs: dict[str, pd.DataFrame]) ->
         for rel in relations[:5]:
             desc = rel.get("description", "")
             lines.append(
-                f"  {rel['table_a']}.{rel['col_a']} → {rel['table_b']}.{rel['col_b']}: {desc}"
+                f"  {rel['table_a']}.{rel['col_a']} -> {rel['table_b']}.{rel['col_b']}: {desc}"
             )
 
     summary = "\n".join(lines)
     return summary[:2000]
 
 
-def _build_code_prompt(user_prompt: str, schema_summary: str, dfs: dict) -> str:
-    """Prompt LLM pour la génération de code — ne contient que des noms de colonnes, pas de valeurs."""
-    # Uniquement les noms de colonnes — JAMAIS les données
-    df_list = "\n".join(
-        f"  - dfs['{name}']: colonnes = {list(df.columns)}" for name, df in dfs.items()
+def _auto_join_hints(dfs: dict[str, pd.DataFrame]) -> str:
+    """Detect potential JOIN keys by finding column names shared across two or more tables."""
+    table_names = list(dfs.keys())
+    hints: list[str] = []
+    for i, t1 in enumerate(table_names):
+        for t2 in table_names[i + 1:]:
+            shared = sorted(set(dfs[t1].columns) & set(dfs[t2].columns))
+            for col in shared:
+                hints.append(f"  {t1}.{col} = {t2}.{col}")
+    return "\n".join(hints) if hints else "  (aucune détectée automatiquement)"
+
+
+def _build_sql_prompt(user_prompt: str, schema_summary: str, dfs: dict) -> str:
+    """Prompt LLM pour la génération SQL — ne contient que des noms de colonnes, pas de valeurs."""
+    table_list = "\n".join(
+        f"  - {name}: colonnes = {list(df.columns)}" for name, df in dfs.items()
     )
+    join_hints = _auto_join_hints(dfs)
     return (
         f"Demande utilisateur : {user_prompt}\n\n"
         f"Schéma :\n{schema_summary}\n\n"
-        f"DataFrames disponibles (variable `dfs`, dict nom→DataFrame) :\n{df_list}\n\n"
-        "Génère du code pandas qui répond à la demande.\n"
+        f"Tables disponibles dans DuckDB (noms exacts à utiliser dans FROM/JOIN) :\n{table_list}\n\n"
+        f"Clés de jointure détectées (colonnes partagées entre tables) :\n{join_hints}\n\n"
+        "Génère des requêtes SQL DuckDB qui répondent à la demande.\n"
         "Règles :\n"
-        "  - `pd` (pandas) et `dfs` sont dans le namespace\n"
-        "  - Assigne le résultat à `result` (dict de DataFrames)\n"
-        "  - Chaque valeur de `result` DOIT être un pd.DataFrame avec colonnes nommées\n"
-        "  - Utilise .reset_index() après tout groupby pour que l'index devienne une colonne\n"
-        "  - Ex correct : result = {'ca_par_region': dfs['ventes'].groupby('region')['ca'].sum().reset_index()}\n"
-        "  - Uniquement des agrégats — jamais les données brutes\n\n"
-        'Retourne : {"code": "...code Python..."}'
+        "  - Utilise uniquement les tables listées ci-dessus\n"
+        "  - Préfère une seule requête GROUP BY qui calcule toutes les métriques demandées à la fois\n"
+        "  - Chaque requête retourne un agrégat (jamais les données brutes)\n"
+        "  - Utilise des alias explicites en français pour toutes les colonnes calculées (ex: AS mois, AS ca_total, AS atteinte_pct, AS commercial)\n"
+        "  - Comparaison cross-tables (ex: comparer le nombre de ventes vs le nombre de clients) : utilise UNION ALL retournant exactement deux colonnes (metric TEXT, valeur NUMERIC)\n"
+        "    Ex: SELECT 'nb_ventes' AS metric, COUNT(*) AS valeur FROM ventes UNION ALL SELECT 'nb_clients' AS metric, COUNT(*) AS valeur FROM clients\n"
+        "  - KPI ou valeur unique (moyenne, somme d'UNE seule métrique) : SELECT uniquement la colonne demandée avec un alias français. Ne calcule PAS la moyenne de toutes les colonnes numériques.\n"
+        "    Correct  : SELECT AVG(ca_ht) AS ca_ht_moyen FROM ventes\n"
+        "    Incorrect: SELECT AVG(vente_id) AS vente_id_mean, AVG(client_id) AS client_id_mean, AVG(ca_ht) AS ca_ht_mean FROM ventes\n"
+        "  - Joins : utilise les clés de jointure listées ci-dessus\n"
+        "  - Évolution temporelle (tendance, évolution mensuelle/annuelle) : GROUP BY DATE_TRUNC('month', col_date) avec alias français 'mois'. Toujours ORDER BY mois.\n"
+        "    Ex : SELECT DATE_TRUNC('month', date) AS mois, SUM(ca_ht) AS ca_mensuel FROM ventes GROUP BY mois ORDER BY mois\n"
+        "  - Dates : les colonnes date/mois sont déjà converties en TIMESTAMP par le moteur. "
+        "Utilise DATE_TRUNC('month', colonne) AS mois (alias TOUJOURS en français minuscule).\n"
+        "    Pour les colonnes de type 'mois' (ex: budget.mois), utilise aussi DATE_TRUNC car elles sont en TIMESTAMP.\n"
+        "    Jointure date↔mois : DATE_TRUNC('month', ventes.date) = DATE_TRUNC('month', budget.mois)\n"
+        '  - Ex correct : {"key": "revenue_by_subcat", "sql": "SELECT s.SubcategoryName, SUM(sa.Revenue) AS TotalRevenue FROM sales sa JOIN products p ON sa.ProductKey = p.ProductKey JOIN subcategory s ON p.ProductSubcategoryKey = s.ProductSubcategoryKey GROUP BY s.SubcategoryName"}\n'
+        'Retourne : {"queries": [{"key": "nom_aggregat", "sql": "SELECT ..."}, ...]}'
     )
 
 
-def _run_code_sync(code: str, dfs: dict[str, pd.DataFrame]) -> dict:
-    """Exécute le code pandas dans un namespace contrôlé (synchrone, appelé via to_thread)."""
-    namespace: dict = {"pd": pd, "dfs": dfs, "result": {}}
-    exec(code, namespace)  # noqa: S102
-    return namespace.get("result", {})
+def _preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert object-typed date-like columns to datetime so DuckDB can apply DATE_TRUNC.
+
+    Uses format='mixed' (pandas >= 2.0) which handles formats like RFC 2822.
+    """
+    import re
+    _DATE_PATTERN = re.compile(r"date|day|month|year|time|period|mois|periode", re.I)
+    df = df.copy()
+    for col in df.columns:
+        if _DATE_PATTERN.search(col) and not pd.api.types.is_datetime64_any_dtype(df[col]):
+            parsed = None
+            # Try YYYY-MM format first (e.g. budget.mois = "2024-01")
+            try:
+                candidate = pd.to_datetime(df[col], format="%Y-%m", errors="coerce")
+                if candidate.notna().mean() > 0.7:
+                    parsed = candidate
+            except Exception:
+                pass
+            # Fall back to mixed format (handles ISO 8601, RFC 2822, etc.)
+            if parsed is None:
+                try:
+                    candidate = pd.to_datetime(df[col], format="mixed", dayfirst=False, errors="coerce")
+                    if candidate.notna().mean() > 0.7:
+                        parsed = candidate
+                except Exception:
+                    try:
+                        candidate = pd.to_datetime(df[col], errors="coerce")
+                        if candidate.notna().mean() > 0.7:
+                            parsed = candidate
+                    except Exception:
+                        pass
+            if parsed is not None:
+                df[col] = parsed
+    return df
+
+
+def _run_sql_sync(queries: list[dict], dfs: dict[str, pd.DataFrame]) -> dict:
+    """Exécute les requêtes SQL dans un connexion DuckDB locale (synchrone, appelé via to_thread)."""
+    conn = duckdb.connect()
+    try:
+        for name, df in dfs.items():
+            conn.register(name, _preprocess_df(df))
+        result: dict = {}
+        for q in queries:
+            key = q.get("key") or "query_result"
+            sql = q.get("sql", "").strip()
+            if sql:
+                result[key] = conn.execute(sql).df()
+        return result
+    finally:
+        conn.close()
 
 
 def _serialize_result(raw_result: dict) -> dict:
-    """Convertit les DataFrames/Series en list-of-dicts, 500 lignes max par agrégat."""
+    """Convertit les DataFrames en list-of-dicts, 500 lignes max par agrégat."""
     aggregates: dict = {}
     for key, value in raw_result.items():
         if isinstance(value, pd.DataFrame):
-            df = value.head(_MAX_ROWS)
-            # Reset index numérique par défaut (0,1,2…) sans l'inclure
-            if isinstance(df.index, pd.RangeIndex):
-                rows = df.to_dict(orient="records")
-            else:
-                # Index nommé (ex: groupby) → le promouvoir en colonne
-                rows = df.reset_index().to_dict(orient="records")
-        elif isinstance(value, pd.Series):
-            s = value.head(_MAX_ROWS)
-            # Nommer l'index si absent pour éviter la colonne "index" générique
-            if s.index.name is None:
-                s.index.name = key  # utilise la clé d'agrégat comme nom de colonne x
-            rows = s.reset_index().to_dict(orient="records")
+            rows = value.head(_MAX_ROWS).to_dict(orient="records")
         else:
             rows = [{"value": value}]
         aggregates[key] = _clean_records(rows)
@@ -132,7 +192,8 @@ def _serialize_result(raw_result: dict) -> dict:
 
 
 def _clean_records(records: list[dict]) -> list[dict]:
-    """Normalise les types numpy/NaN pour la sérialisation JSON."""
+    """Normalise les types numpy/NaN/Timestamp pour la sérialisation JSON."""
+    import datetime
     cleaned = []
     for row in records:
         clean_row = {}
@@ -141,6 +202,10 @@ def _clean_records(records: list[dict]) -> list[dict]:
                 clean_row[k] = v.item()
             elif isinstance(v, float) and pd.isna(v):
                 clean_row[k] = None
+            elif isinstance(v, pd.Timestamp):
+                clean_row[k] = v.strftime("%Y-%m")
+            elif isinstance(v, (datetime.date, datetime.datetime)):
+                clean_row[k] = v.strftime("%Y-%m")
             else:
                 clean_row[k] = v
         cleaned.append(clean_row)
@@ -148,42 +213,65 @@ def _clean_records(records: list[dict]) -> list[dict]:
 
 
 def _compute_fallback(dfs: dict[str, pd.DataFrame]) -> dict:
-    """Génère des agrégats basiques si le code LLM échoue.
+    """Génère des agrégats basiques via DuckDB si la requête LLM échoue.
 
-    Calcule : sommes, moyennes et count sur colonnes numériques.
+    Calcule COUNT, SUM, AVG, et série temporelle mensuelle si colonne date disponible.
     Ne plante jamais — même sur DataFrames vides.
     """
+    import re as _re
+    _DATE_COL_RE = _re.compile(r"date|jour|time|period|mois|periode", _re.I)
+
     aggregates: dict = {}
-    for name, df in dfs.items():
-        if df.empty:
-            aggregates[f"{name}_count"] = [{"count": 0}]
-            continue
-
-        numeric_cols = df.select_dtypes(include="number").columns.tolist()
-
-        if numeric_cols:
-            aggregates[f"{name}_sums"] = [{col: _safe_float(df[col].sum()) for col in numeric_cols}]
-            aggregates[f"{name}_means"] = [
-                {col: round(_safe_float(df[col].mean()), 4) for col in numeric_cols}
-            ]
-
-        aggregates[f"{name}_count"] = [{"count": len(df)}]
-
-    return aggregates
-
-
-def _safe_float(v) -> float:
+    conn = duckdb.connect()
     try:
-        return float(v)
-    except (TypeError, ValueError):
-        return 0.0
+        for name, df in dfs.items():
+            if df.empty:
+                aggregates[f"{name}_count"] = [{"count": 0}]
+                continue
+            conn.register(name, _preprocess_df(df))
+            numeric_cols = df.select_dtypes(include="number").columns.tolist()
+
+            # Sums & means (une seule colonne par agrégat pour éviter les colonnes parasites)
+            if numeric_cols:
+                cols_sum = ", ".join(f'SUM("{c}") AS "{c}_sum"' for c in numeric_cols)
+                sums_df = conn.execute(f'SELECT {cols_sum} FROM "{name}"').df()
+                aggregates[f"{name}_sums"] = _clean_records(sums_df.to_dict(orient="records"))
+
+                for c in numeric_cols:
+                    means_df = conn.execute(
+                        f'SELECT ROUND(AVG("{c}"), 4) AS {c}_moyen FROM "{name}"'
+                    ).df()
+                    aggregates[f"{name}_{c}_moyen"] = _clean_records(means_df.to_dict(orient="records"))
+
+            count_df = conn.execute(f'SELECT COUNT(*) AS count FROM "{name}"').df()
+            aggregates[f"{name}_count"] = _clean_records(count_df.to_dict(orient="records"))
+
+            # Série temporelle mensuelle si une colonne date existe
+            date_cols = [c for c in df.columns if _DATE_COL_RE.search(c)]
+            for date_col in date_cols[:1]:  # une seule colonne date
+                try:
+                    for metric in numeric_cols[:3]:  # au plus 3 métriques
+                        ts_df = conn.execute(
+                            f'SELECT DATE_TRUNC(\'month\', "{date_col}") AS mois, '
+                            f'SUM("{metric}") AS {metric}_mensuel '
+                            f'FROM "{name}" GROUP BY mois ORDER BY mois'
+                        ).df()
+                        if len(ts_df) > 1:
+                            aggregates[f"{name}_{metric}_par_mois"] = _clean_records(
+                                ts_df.to_dict(orient="records")
+                            )
+                except Exception:
+                    pass
+    finally:
+        conn.close()
+    return aggregates
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
 
 class DataAgent(BaseAgent):
-    """Agent 3 — Interprète le prompt, génère du code pandas, exécute les agrégations.
+    """Agent 3 — Interprète le prompt, génère du SQL DuckDB, exécute les agrégations.
 
     RÈGLE ABSOLUE : les données brutes ne passent JAMAIS dans le LLM.
     Le LLM ne reçoit que : schema_summary (noms + types) + noms des colonnes disponibles.
@@ -191,8 +279,8 @@ class DataAgent(BaseAgent):
     Étapes :
         A. Chargement des DataFrames depuis storage.
         B. Construction du schema_summary (métadonnées uniquement).
-        C. Génération du code pandas via LLM.
-        D. Exécution sandbox avec timeout 30s.
+        C. Génération des requêtes SQL via LLM.
+        D. Exécution DuckDB avec timeout 30s.
         E. Sérialisation des résultats (max 500 lignes).
         F. Fallback basique si l'exécution échoue.
 
@@ -221,44 +309,46 @@ class DataAgent(BaseAgent):
         # ── Étape A : chargement des DataFrames ──────────────────────────────
         dfs: dict[str, pd.DataFrame] = {}
         for ref in state["raw_data_refs"]:
-            name = _table_name(ref)
-            dfs[name] = await read_dataframe(ref)
-            log.info("data_agent_loaded_df", table=name, rows=len(dfs[name]))
+            tname = _table_name(ref)
+            dfs[tname] = await read_dataframe(ref)
+            log.info("data_agent_loaded_df", table=tname, rows=len(dfs[tname]))
 
         # ── Étape B : schema_summary (aucune donnée brute) ───────────────────
         schema_summary = _build_schema_summary(state, dfs)
 
-        # ── Étape C : génération du code via LLM ─────────────────────────────
-        code_prompt = _build_code_prompt(state["prompt"], schema_summary, dfs)
+        # ── Étape C : génération SQL via LLM ──────────────────────────────────
+        sql_prompt = _build_sql_prompt(state["prompt"], schema_summary, dfs)
         llm_result = await call_llm_json(
-            prompt=code_prompt,
-            system=_CODE_SYSTEM_PROMPT,
+            prompt=sql_prompt,
+            system=_SQL_SYSTEM_PROMPT,
             model=settings.litellm_cheap_model,
         )
-        code = llm_result.get("code", "")
-        log.info("data_agent_code_generated", code_len=len(code))
+        queries = llm_result.get("queries", [])
+        if not isinstance(queries, list):
+            queries = []
+        log.info("data_agent_sql_generated", n_queries=len(queries))
 
         # ── Étapes D + E : exécution + sérialisation ─────────────────────────
         aggregates: dict = {}
         exec_success = False
 
-        if code:
+        if queries:
             try:
                 raw_result = await asyncio.wait_for(
-                    asyncio.to_thread(_run_code_sync, code, dfs),
+                    asyncio.to_thread(_run_sql_sync, queries, dfs),
                     timeout=_EXEC_TIMEOUT,
                 )
                 aggregates = _serialize_result(raw_result)
                 exec_success = True
-                log.info("data_agent_exec_ok", n_keys=len(aggregates))
+                log.info("data_agent_sql_ok", n_keys=len(aggregates))
             except TimeoutError:
-                msg = f"DataAgent: timeout exec ({_EXEC_TIMEOUT}s)"
+                msg = f"DataAgent: timeout SQL ({_EXEC_TIMEOUT}s)"
                 state["errors"] = state.get("errors", []) + [msg]
-                log.warning("data_agent_exec_timeout")
+                log.warning("data_agent_sql_timeout")
             except Exception as exc:
-                msg = f"DataAgent: exec error: {type(exc).__name__}: {exc}"
+                msg = f"DataAgent: SQL error: {type(exc).__name__}: {exc}"
                 state["errors"] = state.get("errors", []) + [msg]
-                log.warning("data_agent_exec_error", error=str(exc))
+                log.warning("data_agent_sql_error", error=str(exc))
 
         # ── Étape F : fallback ────────────────────────────────────────────────
         if not exec_success or not aggregates:

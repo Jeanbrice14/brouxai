@@ -49,9 +49,36 @@ def format_chart_response(state: PipelineState) -> dict:
 
     viz_spec = viz_specs[0] if viz_specs else {}
     data_key = viz_spec.get("data_key", "")
-    data = aggregates.get(data_key, [])
+    data = aggregates.get(data_key, []) if data_key else []
     if not isinstance(data, list):
         data = []
+
+    # Fallback: no viz_spec or empty data → build a minimal spec from aggregates
+    if (not viz_spec or not data) and aggregates:
+        for key, rows in aggregates.items():
+            if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+                continue
+            cols = list(rows[0].keys())
+            numeric_cols = [c for c in cols if isinstance(rows[0].get(c), (int, float))]
+            str_cols = [c for c in cols if c not in numeric_cols]
+            if not numeric_cols:
+                continue
+            is_temporal = any(
+                t in c.lower() for c in cols for t in ("mois", "date", "month", "semaine", "year")
+            )
+            chart_type = "line" if is_temporal and len(rows) > 2 else "bar"
+            viz_spec = {
+                "chart_type": chart_type,
+                "title": prompt[:80] or key.replace("_", " ").capitalize(),
+                "data_key": key,
+                "x": str_cols[0] if str_cols else cols[0],
+                "y": numeric_cols[0],
+                "color_by": None,
+                "colors": {"primary": "#1E3A8A", "positive": "#16A34A", "negative": "#DC2626"},
+                "annotations": [],
+            }
+            data = rows
+            break
 
     # Tronquer la narration à 2-3 phrases max
     caption = ""
@@ -71,12 +98,26 @@ def format_chart_response(state: PipelineState) -> dict:
 
 def format_report_response(state: PipelineState) -> dict:
     """Formate la réponse pour response_type='report'."""
+    aggregates = state.get("aggregates", {})
+    viz_specs = state.get("viz_specs", [])
+
+    # Injecter les données agrégées dans chaque viz_spec
+    viz_specs_with_data = []
+    for spec in viz_specs:
+        spec_copy = dict(spec)
+        data_key = spec_copy.get("data_key", "")
+        rows = aggregates.get(data_key, [])
+        spec_copy["data"] = rows if isinstance(rows, list) else []
+        viz_specs_with_data.append(spec_copy)
+
     return {
         "type": "report",
         "title": state.get("prompt", "Rapport analytique")[:80],
         "narrative": state.get("narrative", ""),
-        "viz_specs": state.get("viz_specs", []),
-        "aggregates": state.get("aggregates", {}),
+        "insights": state.get("insights", []),
+        "recommendations": state.get("recommendations", []),
+        "viz_specs": viz_specs_with_data,
+        "aggregates": aggregates,
         "qa_score": state.get("qa_report", {}).get("confidence_score", 1.0),
         "html_url": state.get("report_urls", {}).get("html_url", ""),
     }

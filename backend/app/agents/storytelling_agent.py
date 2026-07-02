@@ -7,27 +7,24 @@ import structlog
 from app.agents.base_agent import BaseAgent
 from app.config import settings
 from app.pipeline.state import PipelineState
-from app.services.llm import call_llm
+from app.services.llm import call_llm, call_llm_json
 
 logger = structlog.get_logger(__name__)
-
-_NARRATIVE_SYSTEM_PROMPT = (
-    "Tu es un expert en communication data-driven et storytelling analytique. "
-    "Tu rédiges des narrations claires, professionnelles et factuelles. "
-    "Tu te bases UNIQUEMENT sur les insights fournis. "
-    "Tu n'inventes JAMAIS de chiffres ni d'informations non présentes dans les insights. "
-    "Ta réponse est du texte pur, sans aucun formatage Markdown (pas de **, ##, *, ``)."
-)
-
-_MIN_WORDS = 200
-_MAX_WORDS = 2000
-_NARRATIVE_TEMPERATURE = 0.3
 
 _TONE_INSTRUCTIONS = {
     "formel": "Utilise un registre formel et professionnel, adapté à un rapport de direction.",
     "neutre": "Utilise un registre neutre et factuel, accessible à tout public.",
     "synthétique": "Utilise un registre concis et synthétique, va à l'essentiel.",
 }
+
+# ── System prompts ─────────────────────────────────────────────────────────────
+
+_NARRATIVE_JSON_SYSTEM = (
+    "Tu es un expert en communication data-driven et storytelling analytique. "
+    "Tu produis UNIQUEMENT du JSON valide, sans markdown ni commentaires. "
+    "Tu te bases UNIQUEMENT sur les insights fournis. "
+    "Tu n'inventes JAMAIS de chiffres ni d'informations non présentes dans les insights."
+)
 
 
 def _format_insights_for_prompt(insights: list[dict]) -> str:
@@ -42,7 +39,7 @@ def _format_insights_for_prompt(insights: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_narrative_prompt(
+def _build_report_json_prompt(
     user_prompt: str,
     insights: list[dict],
     tone: str,
@@ -56,42 +53,38 @@ def _build_narrative_prompt(
         f"Demande originale : {user_prompt}\n\n"
         f"Langue : {language} | Ton : {tone}\n"
         f"{tone_instruction}\n\n"
-        f"Insights à narrer :\n{formatted_insights}\n\n"
-        "Rédige la narration avec ces 4 sections :\n"
-        "1. RÉSUMÉ EXÉCUTIF (2-3 phrases maximum)\n"
-        "2. ANALYSE PRINCIPALE (un paragraphe par insight majeur)\n"
-        "3. POINTS D'ATTENTION (uniquement si anomalies présentes, sinon omettre)\n"
-        "4. RECOMMANDATIONS (2-3 actions concrètes et actionnables)\n\n"
-        "Instructions strictes :\n"
+        f"Insights disponibles :\n{formatted_insights}\n\n"
+        "Produis un JSON avec ce format EXACT :\n"
+        "{\n"
+        '  "executive_summary": "2 phrases MAX, texte pur sans titre ni label. '
+        "Commence directement par les chiffres clés. "
+        "Exemple : 736 107 € de CA total sur 198 ventes. "
+        'Le segment PME domine à 279 256 € devant Grand Compte à 175 396 €.",\n'
+        '  "recommendations": [\n'
+        '    "Action concrète et actionnable 1 (verbe + qui + quoi)",\n'
+        '    "Action concrète et actionnable 2 (verbe + qui + quoi)"\n'
+        "  ]\n"
+        "}\n\n"
+        "Règles strictes :\n"
+        "  - executive_summary : 2 phrases MAX, KPIs chiffrés obligatoires\n"
+        "  - Ne JAMAIS commencer par un titre, un label ou 'RÉSUMÉ EXÉCUTIF'\n"
+        "  - Ne JAMAIS inclure les mots 'RÉSUMÉ', 'INSIGHTS', 'RECOMMANDATIONS'\n"
+        "  - Commencer directement par le chiffre ou le fait le plus important\n"
+        "  - Arrondir les nombres à l'entier (pas de décimales dans le résumé)\n"
+        "  - recommendations : 1 à 2 items MAXIMUM, concrets et actionnables, jamais vagues\n"
         "  - Basé UNIQUEMENT sur les insights fournis\n"
         "  - Ne pas inventer de chiffres\n"
-        "  - Texte pur, sans Markdown\n"
     )
     if template:
         base += f"\nTemplate narratif à respecter :\n{template}\n"
     return base
 
 
-def _build_enriched_prompt(original_prompt: str, short_narrative: str) -> str:
-    return (
-        f"{original_prompt}\n\n"
-        f"La narration précédente était trop courte ({len(short_narrative.split())} mots). "
-        f"Développe davantage chaque section. "
-        f"L'analyse principale doit être plus détaillée avec des exemples tirés des données."
-    )
-
-
 def _strip_markdown(text: str) -> str:
-    """Supprime les balises Markdown du texte pour obtenir du texte pur."""
-    # Bold+italic : ***text*** → text
     text = re.sub(r"\*{3}(.+?)\*{3}", r"\1", text, flags=re.DOTALL)
-    # Bold : **text** → text
     text = re.sub(r"\*{2}(.+?)\*{2}", r"\1", text, flags=re.DOTALL)
-    # Italic : *text* → text
     text = re.sub(r"\*(.+?)\*", r"\1", text, flags=re.DOTALL)
-    # Headers : ## Titre → Titre
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    # Inline code : `code` → code
     text = re.sub(r"`(.+?)`", r"\1", text)
     return text.strip()
 
@@ -104,12 +97,12 @@ class StorytellingAgent(BaseAgent):
     """Agent 5 — Construit la narration data-driven structurée.
 
     3 modes selon state["response_type"] :
-    - "table"  : UNE seule phrase de synthèse (max 20 mots)
-    - "chart"  : 2-3 phrases (tendance principale + point notable)
-    - "report" : 4 sections complètes (comportement existant)
+    - "table"  : UNE seule phrase de synthèse (max 20 mots) — call_llm
+    - "chart"  : 2-3 phrases (tendance principale + point notable) — call_llm
+    - "report" : JSON {executive_summary, recommendations} — call_llm_json
 
     Input  : state["insights"] + state["brand_kit"] + state["response_type"]
-    Output : state["narrative"]
+    Output : state["narrative"] (résumé exécutif) + state["recommendations"]
     """
 
     name = "storytelling_agent"
@@ -139,7 +132,6 @@ class StorytellingAgent(BaseAgent):
                 temperature=0.2,
             )
             narrative = _strip_markdown(narrative)
-            # Garantir strictement 1 phrase
             sentences = [s.strip() for s in narrative.replace("\n", " ").split(".") if s.strip()]
             narrative = (sentences[0] + ".") if sentences else narrative[:120]
             log.info("storytelling_complete", mode="table", words=_word_count(narrative))
@@ -161,36 +153,34 @@ class StorytellingAgent(BaseAgent):
                 temperature=0.2,
             )
             narrative = _strip_markdown(narrative)
-            # Tronquer à 3 phrases max
             sentences = [s.strip() for s in narrative.replace("\n", " ").split(".") if s.strip()]
             narrative = ". ".join(sentences[:3]) + ("." if sentences[:3] else "")
             log.info("storytelling_complete", mode="chart", words=_word_count(narrative))
             state["narrative"] = narrative
             return state
 
-        # ── Mode "report" : comportement complet original ─────────────────────
-        narrative_prompt = _build_narrative_prompt(
+        # ── Mode "report" : résumé exécutif + recommandations (JSON) ────────
+        prompt_json = _build_report_json_prompt(
             state["prompt"], insights, tone, language, template
         )
-        narrative = await call_llm(
-            prompt=narrative_prompt,
-            system=_NARRATIVE_SYSTEM_PROMPT,
+        result = await call_llm_json(
+            prompt=prompt_json,
+            system=_NARRATIVE_JSON_SYSTEM,
             model=settings.litellm_default_model,
-            temperature=_NARRATIVE_TEMPERATURE,
         )
-        narrative = _strip_markdown(narrative)
 
-        if _word_count(narrative) < _MIN_WORDS:
-            log.warning("storytelling_narrative_too_short", words=_word_count(narrative))
-            enriched = _build_enriched_prompt(narrative_prompt, narrative)
-            narrative = await call_llm(
-                prompt=enriched,
-                system=_NARRATIVE_SYSTEM_PROMPT,
-                model=settings.litellm_default_model,
-                temperature=_NARRATIVE_TEMPERATURE,
-            )
-            narrative = _strip_markdown(narrative)
+        executive_summary = _strip_markdown(str(result.get("executive_summary", "")))
+        raw_recommendations = result.get("recommendations", [])
+        recommendations = [
+            _strip_markdown(str(r)) for r in raw_recommendations if r
+        ][:2]  # max 2
 
-        log.info("storytelling_complete", mode="report", words=_word_count(narrative))
-        state["narrative"] = narrative
+        log.info(
+            "storytelling_complete",
+            mode="report",
+            summary_words=_word_count(executive_summary),
+            recommendations=len(recommendations),
+        )
+        state["narrative"] = executive_summary
+        state["recommendations"] = recommendations
         return state

@@ -87,13 +87,16 @@ async def test_generates_html_with_narrative():
     agent2 = LayoutAgent()
     import json as _json
 
-    from app.agents.layout_agent import _extract_colors, _format_date, _split_paragraphs
+    from app.agents.layout_agent import _extract_colors, _format_date, _split_paragraphs, _enrich_insights
 
     brand_kit = {}
     language = "fr"
     colors = _extract_colors(brand_kit)
     paragraphs = _split_paragraphs(_NARRATIVE_3_PARAS)
     viz_specs = _VIZ_SPECS
+    sample_insights = [
+        {"title": "IDF domine", "description": "42% du CA", "type": "highlight", "confidence": 0.92, "supporting_data": "ca_ht IDF: 42100", "impact": "high"},
+    ]
     context = {
         "language": language,
         "prompt": "Analyse les ventes par région",
@@ -102,7 +105,10 @@ async def test_generates_html_with_narrative():
         "colors": colors,
         "logo_url": "",
         "company_name": "",
-        "paragraphs": paragraphs,
+        "executive_summary": paragraphs[0] if paragraphs else "",
+        "insights": _enrich_insights(sample_insights),
+        "recommendations": ["Optimiser la région Ouest."],
+        "qa_score": 92,
         "viz_specs": viz_specs,
         "viz_specs_json": _json.dumps(viz_specs),
     }

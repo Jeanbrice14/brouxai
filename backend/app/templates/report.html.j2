@@ -4,380 +4,297 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{{ prompt | truncate(80) }} — BrouxAI</title>
-
-  <!-- Chart.js — pas de dépendance React, CDN stable -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-
   <style>
-    /* ── Variables CSS brand_kit ─────────────────────────────── */
     :root {
-      --color-primary:  {{ colors.primary }};
-      --color-positive: {{ colors.positive }};
-      --color-negative: {{ colors.negative }};
-      --color-bg:       #f8f9fa;
-      --color-surface:  #ffffff;
-      --color-text:     #1a1a1a;
-      --color-muted:    #6b7280;
-      --radius:         8px;
+      --primary:  {{ colors.primary }};
+      --positive: {{ colors.positive }};
+      --negative: {{ colors.negative }};
+      --bg:       #f8f9fa;
+      --surface:  #ffffff;
+      --text:     #1a1a1a;
+      --muted:    #6b7280;
+      --border:   #e5e7eb;
+      --radius:   8px;
     }
-
-    /* ── Reset & base ────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
     body {
       font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-      background: var(--color-bg);
-      color: var(--color-text);
-      line-height: 1.65;
-      font-size: 16px;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      font-size: 15px;
     }
+    .page { max-width: 860px; margin: 0 auto; padding: 2rem 1.5rem; }
 
-    /* ── Layout ──────────────────────────────────────────────── */
-    .page-wrapper {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 2rem 1.5rem;
+    /* ── Header ── */
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding-bottom: 1rem; border-bottom: 3px solid var(--primary);
+      margin-bottom: 1.5rem; gap: 1rem;
     }
-
-    /* ── Header ──────────────────────────────────────────────── */
-    .report-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding-bottom: 1.5rem;
-      border-bottom: 3px solid var(--color-primary);
-      margin-bottom: 2rem;
-      gap: 1rem;
-    }
-    .report-header .brand {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-    .report-header .brand img {
-      max-height: 48px;
-      max-width: 160px;
-      object-fit: contain;
-    }
-    .report-header .company-name {
-      font-size: 1.1rem;
-      font-weight: 700;
-      color: var(--color-primary);
-    }
-    .report-header .report-date {
-      font-size: 0.875rem;
-      color: var(--color-muted);
-      white-space: nowrap;
-    }
-
-    /* ── Titre principal ─────────────────────────────────────── */
+    .brand { display: flex; align-items: center; gap: .75rem; }
+    .brand img { max-height: 40px; max-width: 140px; object-fit: contain; }
+    .company { font-size: 1rem; font-weight: 700; color: var(--primary); }
+    .date { font-size: .8rem; color: var(--muted); white-space: nowrap; }
     .report-title {
-      font-size: 1.75rem;
-      font-weight: 800;
-      color: var(--color-primary);
-      margin-bottom: 0.5rem;
-      line-height: 1.3;
-    }
-    .report-subtitle {
-      font-size: 0.9rem;
-      color: var(--color-muted);
-      margin-bottom: 2rem;
+      font-size: 1.5rem; font-weight: 800; color: var(--primary);
+      margin-bottom: 1.5rem; line-height: 1.3;
     }
 
-    /* ── Carte générique ─────────────────────────────────────── */
+    /* ── Card générique ── */
     .card {
-      background: var(--color-surface);
-      border-radius: var(--radius);
-      padding: 1.5rem 1.75rem;
-      margin-bottom: 1.75rem;
-      box-shadow: 0 1px 4px rgba(0,0,0,.07);
+      background: var(--surface); border-radius: var(--radius);
+      padding: 1.25rem 1.5rem; margin-bottom: 1.25rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,.07);
     }
-    .card-title {
-      font-size: 0.75rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-      color: var(--color-muted);
-      margin-bottom: 0.75rem;
+    .section-label {
+      font-size: .7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .1em; color: var(--muted);
+      margin-bottom: .75rem;
     }
+    .divider { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
 
-    /* ── Résumé exécutif ─────────────────────────────────────── */
-    .executive-summary p {
-      font-size: 1.05rem;
-      font-weight: 500;
+    /* ── Résumé ── */
+    .summary-text {
+      font-size: 1rem; font-weight: 500; color: var(--text);
       line-height: 1.7;
+      border-left: 3px solid var(--primary);
+      padding-left: 1rem;
     }
 
-    /* ── Section graphiques ──────────────────────────────────── */
-    .charts-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
-      gap: 1.5rem;
-      margin-bottom: 1.75rem;
+    /* ── Highlights (insights) ── */
+    .insight-row {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 8px 0; border-bottom: 1px solid var(--border);
     }
-    .chart-card {
-      background: var(--color-surface);
-      border-radius: var(--radius);
-      padding: 1.25rem 1.5rem;
-      box-shadow: 0 1px 4px rgba(0,0,0,.07);
-    }
-    .chart-title {
-      font-size: 0.9rem;
-      font-weight: 600;
-      margin-bottom: 0.75rem;
-      color: var(--color-text);
-    }
-    .chart-container {
-      width: 100%;
-      height: 280px;
-      position: relative;
-    }
-    .chart-container canvas {
-      display: block;
+    .insight-row:last-child { border-bottom: none; }
+    .insight-icon { font-size: 1.1rem; flex-shrink: 0; width: 22px; }
+    .insight-title { flex: 1; font-size: .9rem; font-weight: 600; color: var(--text); }
+    .insight-data { font-size: .82rem; color: var(--muted); max-width: 220px; text-align: right; }
+    .insight-badge {
+      flex-shrink: 0; font-size: .72rem; font-weight: 700;
+      padding: 1px 7px; border-radius: 99px;
     }
 
-    /* ── Narration ───────────────────────────────────────────── */
-    .narrative-section p {
-      margin-bottom: 1rem;
-      line-height: 1.8;
-    }
-    .narrative-section p:last-child { margin-bottom: 0; }
+    /* ── Graphique ── */
+    .chart-title { font-size: .9rem; font-weight: 600; margin-bottom: .75rem; }
+    .chart-wrap { width: 100%; height: 260px; position: relative; }
+    .chart-wrap canvas { display: block; }
 
-    /* ── Pied de page ────────────────────────────────────────── */
-    .report-footer {
-      margin-top: 3rem;
-      padding-top: 1rem;
-      border-top: 1px solid #e5e7eb;
-      font-size: 0.8rem;
-      color: var(--color-muted);
-      text-align: center;
+    /* ── Recommandations ── */
+    .reco-list { padding-left: 1.25rem; }
+    .reco-list li { font-size: .9rem; color: var(--text); line-height: 1.6; margin-bottom: .5rem; }
+    .reco-list li:last-child { margin-bottom: 0; }
+
+    /* ── Score fiabilité ── */
+    .score-row { display: flex; align-items: center; gap: 10px; }
+    .score-label { font-size: .82rem; color: var(--muted); }
+    .score-bar-wrap { flex: 1; height: 6px; background: var(--border); border-radius: 99px; overflow: hidden; }
+    .score-bar-fill { height: 100%; border-radius: 99px; }
+    .score-pct { font-size: .82rem; font-weight: 700; }
+
+    /* ── Footer ── */
+    .footer {
+      margin-top: 2rem; padding-top: .75rem; border-top: 1px solid var(--border);
+      font-size: .75rem; color: var(--muted); text-align: center;
     }
 
-    /* ── Impression ──────────────────────────────────────────── */
     @media print {
-      body { background: white; font-size: 12pt; }
-      .page-wrapper { max-width: 100%; padding: 0; }
-      .card, .chart-card {
-        box-shadow: none;
-        border: 1px solid #e5e7eb;
-        break-inside: avoid;
-      }
-      .charts-grid { grid-template-columns: 1fr 1fr; }
+      body { background: white; }
+      .page { max-width: 100%; padding: 0; }
+      .card { box-shadow: none; border: 1px solid var(--border); break-inside: avoid; }
     }
-
     @media (max-width: 600px) {
-      .charts-grid { grid-template-columns: 1fr; }
-      .report-title { font-size: 1.35rem; }
+      .insight-data { display: none; }
+      .report-title { font-size: 1.2rem; }
     }
   </style>
 </head>
 <body>
-  <div class="page-wrapper">
+<div class="page">
 
-    <!-- ── En-tête ─────────────────────────────────────────── -->
-    <header class="report-header">
-      <div class="brand">
-        {% if logo_url %}
-        <img src="{{ logo_url }}" alt="Logo" />
-        {% endif %}
-        {% if company_name %}
-        <span class="company-name">{{ company_name }}</span>
-        {% endif %}
-      </div>
-      <span class="report-date">{{ report_date }}</span>
-    </header>
-
-    <!-- ── Titre ───────────────────────────────────────────── -->
-    <h1 class="report-title">{{ prompt }}</h1>
-    <p class="report-subtitle">Rapport #{{ report_id }}</p>
-
-    <!-- ── Résumé exécutif ─────────────────────────────────── -->
-    {% if paragraphs %}
-    <div class="card executive-summary">
-      <div class="card-title">Résumé exécutif</div>
-      <p>{{ paragraphs[0] }}</p>
+  <!-- ── Header ── -->
+  <header class="header">
+    <div class="brand">
+      {% if logo_url %}<img src="{{ logo_url }}" alt="Logo" />{% endif %}
+      {% if company_name %}<span class="company">{{ company_name }}</span>{% endif %}
     </div>
+    <span class="date">{{ report_date }}</span>
+  </header>
+
+  <h1 class="report-title">{{ prompt }}</h1>
+
+  <!-- ── Résumé exécutif ── -->
+  {% if executive_summary %}
+  <div class="card">
+    <div class="section-label">Résumé</div>
+    <p class="summary-text">{{ executive_summary }}</p>
+  </div>
+  {% endif %}
+
+  <!-- ── Highlights (insights) ── -->
+  {% if insights %}
+  <div class="card">
+    <div class="section-label">Highlights</div>
+    {% for insight in insights %}
+    {% set pct = (insight.confidence * 100) | int %}
+    {% if pct >= 80 %}
+      {% set badge_bg = "#DCFCE7" %}{% set badge_color = "#16A34A" %}
+    {% elif pct >= 60 %}
+      {% set badge_bg = "#FEF9C3" %}{% set badge_color = "#CA8A04" %}
+    {% else %}
+      {% set badge_bg = "#FEE2E2" %}{% set badge_color = "#DC2626" %}
     {% endif %}
+    <div class="insight-row">
+      <span class="insight-icon" style="color: {{ insight.icon_color }}">{{ insight.icon }}</span>
+      <span class="insight-title">{{ insight.title }}</span>
+      <span class="insight-data">{{ insight.supporting_data | truncate(50) }}</span>
+      <span class="insight-badge" style="background: {{ badge_bg }}; color: {{ badge_color }}">{{ pct }}%</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 
-    <!-- ── Graphiques ─────────────────────────────────────── -->
-    {% if viz_specs %}
-    <div class="charts-grid">
-      {% for spec in viz_specs %}
-      <div class="chart-card">
-        <div class="chart-title">{{ spec.title }}</div>
-        <div class="chart-container">
-          <canvas id="chart-{{ loop.index0 }}"></canvas>
-        </div>
+  <!-- ── Visualisation principale (1 seul graphique) ── -->
+  {% if viz_specs %}
+  <div class="card">
+    <div class="section-label">Visualisation principale</div>
+    <div class="chart-title">{{ viz_specs[0].title }}</div>
+    <div class="chart-wrap"><canvas id="chart-0"></canvas></div>
+  </div>
+  {% endif %}
+
+  <!-- ── Recommandations ── -->
+  {% if recommendations %}
+  <div class="card">
+    <div class="section-label">Recommandations</div>
+    <ol class="reco-list">
+      {% for reco in recommendations %}
+      <li>{{ reco }}</li>
+      {% endfor %}
+    </ol>
+  </div>
+  {% endif %}
+
+  <!-- ── Score fiabilité ── -->
+  <div class="card">
+    {% set _qs = qa_score | default(100) %}
+    {% set score_color = colors.positive if _qs >= 80 else ("#CA8A04" if _qs >= 60 else colors.negative) %}
+    <div class="score-row">
+      <span class="score-label">Score fiabilité</span>
+      <div class="score-bar-wrap">
+        <div class="score-bar-fill" style="width: {{ _qs }}%; background: {{ score_color }}"></div>
       </div>
-      {% endfor %}
+      <span class="score-pct" style="color: {{ score_color }}">{{ _qs }}%</span>
     </div>
-    {% endif %}
+  </div>
 
-    <!-- ── Narration complète ─────────────────────────────── -->
-    <div class="card narrative-section">
-      <div class="card-title">Analyse complète</div>
-      {% for para in paragraphs %}
-      <p>{{ para }}</p>
-      {% endfor %}
-    </div>
+  <!-- ── Footer ── -->
+  <footer class="footer">Généré par BrouxAI &mdash; {{ report_id }} &mdash; {{ report_date }}</footer>
 
-    <!-- ── Pied de page ────────────────────────────────────── -->
-    <footer class="report-footer">
-      Généré par BrouxAI &mdash; {{ report_id }} &mdash; {{ report_date }}
-    </footer>
+</div>
 
-  </div><!-- /.page-wrapper -->
+<!-- Données viz injectées côté serveur -->
+<script>
+  window.__VIZ_SPECS__ = {{ viz_specs_json | safe }};
+  window.__BRAND_COLORS__ = {
+    primary:  "{{ colors.primary | safe }}",
+    positive: "{{ colors.positive | safe }}",
+    negative: "{{ colors.negative | safe }}"
+  };
+</script>
 
-  <!-- ── Données viz injectées côté serveur ─────────────── -->
-  <script>
-    window.__VIZ_SPECS__ = {{ viz_specs_json | safe }};
-    window.__BRAND_COLORS__ = {
-      primary:  "{{ colors.primary | safe }}",
-      positive: "{{ colors.positive | safe }}",
-      negative: "{{ colors.negative | safe }}"
-    };
-  </script>
+<script>
+(function () {
+  if (typeof Chart === "undefined") return;
+  var specs  = window.__VIZ_SPECS__ || [];
+  var colors = window.__BRAND_COLORS__;
 
-  <!-- ── Rendu Chart.js ──────────────────────────────────── -->
-  <script>
-  (function () {
-    if (typeof Chart === "undefined") {
-      console.warn("BrouxAI: Chart.js non chargé — graphiques désactivés.");
-      return;
-    }
+  var PIE_PALETTE = [
+    colors.primary || "#1E3A8A", colors.positive || "#16A34A", colors.negative || "#DC2626",
+    "#8B5CF6", "#F59E0B", "#0EA5E9", "#EC4899"
+  ];
 
-    var specs  = window.__VIZ_SPECS__ || [];
-    var colors = window.__BRAND_COLORS__;
+  function getColor(spec) { var c = spec.colors || {}; return c.primary || colors.primary || "#1E3A8A"; }
+  function getLabels(data, key) { return data.map(function(r) { return r[key] !== undefined ? r[key] : ""; }); }
+  function getValues(data, key) { return data.map(function(r) { return Number(r[key]) || 0; }); }
 
-    var PIE_PALETTE = [
-      colors.primary  || "#1E3A8A",
-      colors.positive || "#16A34A",
-      colors.negative || "#DC2626",
-      "#8B5CF6", "#F59E0B", "#0EA5E9", "#EC4899"
-    ];
+  function renderBar(canvas, spec, data) {
+    var color = getColor(spec);
+    new Chart(canvas, {
+      type: "bar",
+      data: {
+        labels: getLabels(data, spec.x),
+        datasets: [{ label: spec.y, data: getValues(data, spec.y),
+          backgroundColor: color + "cc", borderColor: color, borderWidth: 1, borderRadius: 4 }]
+      },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, grid: { color: "#f0f0f0" } }, x: { grid: { display: false } } } }
+    });
+  }
 
-    function getColor(spec) {
-      var c = spec.colors || {};
-      return c.primary || colors.primary || "#1E3A8A";
-    }
+  function renderLine(canvas, spec, data) {
+    var color = getColor(spec);
+    new Chart(canvas, {
+      type: "line",
+      data: {
+        labels: getLabels(data, spec.x),
+        datasets: [{ label: spec.y, data: getValues(data, spec.y),
+          borderColor: color, backgroundColor: color + "22", borderWidth: 2,
+          pointRadius: 4, fill: true, tension: 0.3 }]
+      },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: false, grid: { color: "#f0f0f0" } }, x: { grid: { display: false } } } }
+    });
+  }
 
-    function getLabels(data, key) {
-      return data.map(function(row) { return row[key] !== undefined ? row[key] : ""; });
-    }
+  function renderPie(canvas, spec, data) {
+    new Chart(canvas, {
+      type: "pie",
+      data: { labels: getLabels(data, spec.x),
+        datasets: [{ data: getValues(data, spec.y),
+          backgroundColor: PIE_PALETTE.slice(0, data.length), borderWidth: 1 }] },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "bottom" } } }
+    });
+  }
 
-    function getValues(data, key) {
-      return data.map(function(row) { return Number(row[key]) || 0; });
-    }
+  function renderScatter(canvas, spec, data) {
+    var color = getColor(spec);
+    var points = data.map(function(r) { return { x: Number(r[spec.x]) || 0, y: Number(r[spec.y]) || 0 }; });
+    new Chart(canvas, {
+      type: "scatter",
+      data: { datasets: [{ label: spec.title || "", data: points,
+        backgroundColor: color + "99", borderColor: color }] },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { grid: { color: "#f0f0f0" } }, y: { grid: { color: "#f0f0f0" } } } }
+    });
+  }
 
-    function renderBar(canvas, spec, data) {
-      var color = getColor(spec);
-      new Chart(canvas, {
-        type: "bar",
-        data: {
-          labels: getLabels(data, spec.x),
-          datasets: [{
-            label: spec.y,
-            data: getValues(data, spec.y),
-            backgroundColor: color + "cc",
-            borderColor: color,
-            borderWidth: 1,
-            borderRadius: 4
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
-          scales: { y: { beginAtZero: true, grid: { color: "#f0f0f0" } }, x: { grid: { display: false } } }
-        }
-      });
-    }
+  var renderers = { bar: renderBar, line: renderLine, pie: renderPie, scatter: renderScatter, histogram: renderBar };
 
-    function renderLine(canvas, spec, data) {
-      var color = getColor(spec);
-      new Chart(canvas, {
-        type: "line",
-        data: {
-          labels: getLabels(data, spec.x),
-          datasets: [{
-            label: spec.y,
-            data: getValues(data, spec.y),
-            borderColor: color,
-            backgroundColor: color + "22",
-            borderWidth: 2,
-            pointRadius: 4,
-            fill: true,
-            tension: 0.3
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
-          scales: { y: { beginAtZero: false, grid: { color: "#f0f0f0" } }, x: { grid: { display: false } } }
-        }
-      });
-    }
-
-    function renderPie(canvas, spec, data) {
-      new Chart(canvas, {
-        type: "pie",
-        data: {
-          labels: getLabels(data, spec.x),
-          datasets: [{
-            data: getValues(data, spec.y),
-            backgroundColor: PIE_PALETTE.slice(0, data.length),
-            borderWidth: 1
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { position: "bottom" } }
-        }
-      });
-    }
-
-    function renderScatter(canvas, spec, data) {
-      var color = getColor(spec);
-      var points = data.map(function(row) {
-        return { x: Number(row[spec.x]) || 0, y: Number(row[spec.y]) || 0 };
-      });
-      new Chart(canvas, {
-        type: "scatter",
-        data: { datasets: [{ label: spec.title || "", data: points, backgroundColor: color + "99", borderColor: color }] },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
-          scales: { x: { grid: { color: "#f0f0f0" } }, y: { grid: { color: "#f0f0f0" } } }
-        }
-      });
-    }
-
-    var renderers = {
-      bar:       renderBar,
-      line:      renderLine,
-      pie:       renderPie,
-      scatter:   renderScatter,
-      histogram: renderBar
-    };
-
-    specs.forEach(function(spec, idx) {
-      var canvas = document.getElementById("chart-" + idx);
-      if (!canvas) return;
+  /* Render only the first spec (primary visualization) */
+  if (specs.length > 0) {
+    var spec = specs[0];
+    var canvas = document.getElementById("chart-0");
+    if (canvas) {
       var data = Array.isArray(spec.data) ? spec.data : [];
       if (data.length === 0) {
-        canvas.parentElement.innerHTML = "<p style='color:#6b7280;font-size:0.85rem;padding:1rem'>Aucune donnée disponible.</p>";
-        return;
+        canvas.parentElement.innerHTML = "<p style='color:#6b7280;font-size:.85rem;padding:1rem'>Aucune donnée disponible.</p>";
+      } else {
+        var fn = renderers[spec.chart_type] || renderBar;
+        try { fn(canvas, spec, data); } catch (e) {
+          canvas.parentElement.innerHTML = "<p style='color:#6b7280;font-size:.85rem;padding:1rem'>Graphique non disponible.</p>";
+          console.error("BrouxAI chart error:", e);
+        }
       }
-      var fn = renderers[spec.chart_type] || renderBar;
-      try {
-        fn(canvas, spec, data);
-      } catch (e) {
-        canvas.parentElement.innerHTML = "<p style='color:#6b7280;font-size:0.85rem;padding:1rem'>Graphique non disponible.</p>";
-        console.error("BrouxAI chart error [" + idx + "]:", e);
-      }
-    });
-
-  })();
-  </script>
-
+    }
+  }
+})();
+</script>
 </body>
 </html>

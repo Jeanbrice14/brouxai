@@ -73,6 +73,30 @@ def _build_report_ref(tenant_id: str, report_id: str) -> str:
     return f"s3://{settings.storage_bucket}/{tenant_id}/reports/{report_id}/report.html"
 
 
+def _insight_icon(insight: dict) -> tuple[str, str]:
+    """Retourne (icône, couleur_css) selon type et impact."""
+    ins_type = insight.get("type", "").lower()
+    impact = insight.get("impact", "").lower()
+    if ins_type == "anomaly":
+        return "⚠", "#CA8A04"
+    if ins_type == "comparison":
+        return "↔", "#6B7280"
+    if impact == "low":
+        return "↘", "#DC2626"
+    return "↗", "#16A34A"
+
+
+def _enrich_insights(insights: list[dict]) -> list[dict]:
+    result = []
+    for ins in insights:
+        copy = dict(ins)
+        icon, color = _insight_icon(ins)
+        copy["icon"] = icon
+        copy["icon_color"] = color
+        result.append(copy)
+    return result
+
+
 def _build_html_url(tenant_id: str, report_id: str) -> str:
     """Construit l'URL publique du rapport HTML."""
     key = f"{tenant_id}/reports/{report_id}/report.html"
@@ -140,6 +164,11 @@ class LayoutAgent(BaseAgent):
 
         viz_specs_json = json.dumps(viz_specs_with_data, ensure_ascii=False, default=str)
 
+        qa_report = state.get("qa_report") or {}
+        qa_score = int((qa_report.get("confidence_score") or 1.0) * 100)
+        enriched_insights = _enrich_insights(state.get("insights", []))
+        recommendations = state.get("recommendations", [])
+
         context = {
             "language": language,
             "prompt": state.get("prompt", "Rapport analytique"),
@@ -148,9 +177,12 @@ class LayoutAgent(BaseAgent):
             "colors": colors,
             "logo_url": brand_kit.get("logo_url", ""),
             "company_name": brand_kit.get("company_name", ""),
-            "paragraphs": paragraphs,
+            "executive_summary": paragraphs[0] if paragraphs else "",
+            "insights": enriched_insights,
+            "recommendations": recommendations,
             "viz_specs": viz_specs_with_data,
             "viz_specs_json": viz_specs_json,
+            "qa_score": qa_score,
         }
 
         template = self._jinja_env.get_template("report.html.j2")
@@ -162,10 +194,16 @@ class LayoutAgent(BaseAgent):
         report_id = state.get("report_id", "")
         ref = _build_report_ref(tenant_id, report_id)
         html_bytes = html_content.encode("utf-8")
-        await upload_file(ref, html_bytes, content_type="text/html; charset=utf-8")
 
-        html_url = _build_html_url(tenant_id, report_id)
-        log.info("layout_uploaded", html_url=html_url)
+        # HTML export is non-blocking: if MinIO is unavailable, report data is still
+        # accessible via the API response — only the iframe preview is lost.
+        html_url = ""
+        try:
+            await upload_file(ref, html_bytes, content_type="text/html; charset=utf-8")
+            html_url = _build_html_url(tenant_id, report_id)
+            log.info("layout_uploaded", html_url=html_url)
+        except Exception as exc:
+            log.warning("layout_html_upload_skipped", error=str(exc))
 
         state["report_urls"] = {"html_url": html_url}
         state["response"] = format_report_response(state)

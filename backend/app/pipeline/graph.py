@@ -114,13 +114,13 @@ def build_pipeline() -> StateGraph:
         {HITL_WAIT: NODE_HITL_WAIT, CONTINUE: NODE_DATA, END: END},
     )
 
-    # data → (simple_query → layout) | (chart_request → viz → layout) | (full_report → insight → ...)
+    # data → (simple_query → layout) | (chart_request/full_report → insight → ...)
     graph.add_conditional_edges(
         NODE_DATA,
         _route_after_data,
         {
             "direct_layout": NODE_LAYOUT,
-            "direct_viz": NODE_VIZ,
+            "direct_viz": NODE_INSIGHT,  # chart_request passe par insight pour avoir des specs
             "full_pipeline": NODE_INSIGHT,
         },
     )
