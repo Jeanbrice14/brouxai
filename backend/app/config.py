@@ -21,10 +21,6 @@ class Settings(BaseSettings):
     litellm_default_model: str = "gpt-5.4"
     litellm_cheap_model: str = "gpt-5.4-mini"
 
-    # Base de données
-    database_url: str = "postgresql+asyncpg://narr8:narr8dev@localhost:5432/narr8"
-    database_url_sync: str = "postgresql://narr8:narr8dev@localhost:5432/narr8"
-
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
@@ -53,7 +49,8 @@ class Settings(BaseSettings):
     # de génération DAX du serveur MCP si disponible (repli automatique sur "llm" sinon).
     powerbi_dax_generation_mode: str = "llm"
 
-    # RAG schéma sémantique (pgvector) — mode powerbi_local uniquement
+    # RAG schéma sémantique (embeddings stockés dans Redis, cf. app/services/schema_rag.py)
+    # — mode powerbi_local uniquement
     schema_rag_embedding_model: str = "text-embedding-3-small"
     # Nombre de champs de schéma retournés par retrieve_relevant_fields — configurable
     # pour ajustement empirique sans redéploiement (valeur de départ, à affiner).
@@ -61,6 +58,12 @@ class Settings(BaseSettings):
     # TTL du hash de schéma en cache Redis (secondes) — 30 jours : le schéma d'un modèle
     # Power BI change rarement ; expirer force juste un recalcul de hash, jamais un blocage.
     schema_rag_hash_ttl_seconds: int = 2_592_000
+
+    # Mémoire de conversation — nombre de tours (question, réponse résumée) conservés par
+    # session pour la résolution de références ("cette catégorie", "et le mois dernier ?").
+    # Résumé texte seulement (jamais les agrégats bruts) — coût négligeable même injecté
+    # systématiquement, pas besoin de détection heuristique de pertinence.
+    chat_history_k: int = 3
 
 
 settings = Settings()

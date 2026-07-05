@@ -221,57 +221,54 @@ réellement de HITL en v0, voir `qa_agent.py`).
    indéfiniment, pour toutes les requêtes futures — une plomberie différente de la reprise
    HITL actuelle, à concevoir spécifiquement si cette piste est retenue.
 
-## RAG schéma sémantique (pgvector) — mode powerbi_local
+## RAG schéma sémantique — mode powerbi_local
 
 `DataAgent` injectait jusqu'ici tout `semantic_model_info` (toutes les tables/colonnes/mesures
 du modèle Power BI) dans le prompt de génération DAX, même pour des questions ne portant que
-sur un sous-ensemble — coûteux en tokens et risque de disperser le LLM. Un système RAG sur
-pgvector indexe le schéma une fois par (tenant, modèle) et ne récupère que les k champs les
-plus pertinents pour chaque question.
+sur un sous-ensemble — coûteux en tokens et risque de disperser le LLM. Un système RAG indexe
+le schéma une fois par (tenant, modèle) et ne récupère que les k champs les plus pertinents
+pour chaque question.
 
-### Mise en place
+### Stockage : Redis, pas Postgres/pgvector
 
-```bash
-docker compose up -d postgres   # pgvector/pgvector:pg16
-cd backend
-alembic upgrade head            # active l'extension vector + crée semantic_field_embeddings
-```
+**Historique** : la première implémentation utilisait Postgres/pgvector (SQLAlchemy async,
+`app/db.py`, migrations Alembic). Diagnostic complet mené sur cette base avant d'être
+abandonnée — utile pour comprendre pourquoi Redis a été choisi à la place :
 
-### Blocage réseau Windows → Postgres : résolu (backend en conteneur)
+- Un backend lancé nativement sur Windows (`uvicorn` en local — requis pour le serveur MCP
+  Power BI, voir plus bas) ne pouvait **jamais** joindre le Postgres dockerisé de façon
+  fiable (`ConnectionDoesNotExistError: connection was closed in the middle of operation`,
+  reproductible sur une connexion neuve, sans pooling). Ni redémarrer le conteneur Postgres,
+  ni le recréer entièrement, ni redémarrer Docker Desktop dans son intégralité ne corrigeaient
+  le problème — un blocage permanent de ce chemin réseau précis sur ce type de machine
+  (Windows + Docker Desktop), pas un aléa ponctuel.
+- Le contournement testé (faire tourner le **backend lui-même** dans un conteneur Docker, sur
+  le même réseau que Postgres) fonctionnait pour Postgres, mais rendait alors le serveur MCP
+  Power BI totalement inaccessible : son client Analysis Services (ADOMD.NET) refuse toute
+  connexion dès que son propre runtime .NET tourne sur Linux (*"This feature is supported for
+  a .NET Core client only on Windows systems."*) — confirmé même en pointant explicitement
+  vers `host.docker.internal:<port>` (la connectivité réseau brute EST fonctionnelle, ce n'est
+  pas ça le blocage). RAG et MCP Power BI natif étaient donc mutuellement exclusifs sur cette
+  machine, quel que soit le réglage réseau/Docker essayé.
 
-**Diagnostic (session précédente)** : la connexion asyncpg/psycopg2 depuis un backend lancé
-nativement sur Windows (`uvicorn` en local) vers le Postgres dockerisé échouait
-systématiquement (`ConnectionResetError` / `UnicodeDecodeError` selon le driver) — le handshake
-protocole Postgres complet fonctionnait pourtant en socket brut manuel (SSL negotiation,
-SCRAM/MD5 auth request tous reçus correctement), la connexion étant réinitialisée précisément
-quand le driver client écrit sa réponse d'authentification. Cause probable : interaction Docker
-Desktop (proxy réseau Windows) / pile asyncio Proactor.
+**Solution retenue** : stocker les embeddings dans **Redis** (déjà utilisé nativement sans
+aucun problème par tout le reste du projet — cache, sessions, mémoire de conversation) plutôt
+que Postgres, et faire la recherche par similarité cosinus **en Python** (`numpy`,
+`_cosine_similarity`) plutôt qu'en SQL. Cela élimine complètement la dépendance Postgres pour
+le RAG — mêmes principes (vectorisation, similarité cosinus, retrieval top-k), juste un moteur
+de stockage/calcul différent. À cette échelle (un seul modèle Power BI, au plus quelques
+centaines de champs), un scan linéaire en mémoire est tout aussi exact qu'un index pgvector
+non approximatif (jamais configuré de toute façon), pour un coût de quelques millisecondes.
+Conséquence directe : plus besoin de choisir entre RAG et MCP Power BI natif, ni de conteneur
+dédié — tout fonctionne dans le même processus backend natif.
 
-**Hypothèse testée et confirmée** : faire tourner le **backend lui-même dans un conteneur
-Docker**, sur le même réseau que Postgres, plutôt que nativement sur Windows. Résultat : connexion
-immédiate et stable, `index_schema()`/`retrieve_relevant_fields()` réels validés de bout en bout
-(147 champs indexés, retrieval hybride confirmé avec le vrai pgvector — voir ci-dessus). Le
-problème est donc bien localisé au chemin réseau Windows-hôte → proxy Docker Desktop → conteneur,
-pas à pgvector, asyncpg, ni au code applicatif.
-
-**Méthode recommandée sur Windows** (`backend/Dockerfile` + service `backend` dans
-`docker-compose.yml`, profil `backend` — n'affecte pas `docker compose up -d` par défaut) :
-
-```bash
-docker compose --profile backend up -d --build backend
-curl http://localhost:8000/health
-```
-
-Le service surcharge `DATABASE_URL`/`DATABASE_URL_SYNC`/`REDIS_URL`/`STORAGE_ENDPOINT` de
-`backend/.env` (qui pointent vers `localhost`, valables pour un usage natif) avec les noms de
-service Docker (`postgres`/`redis`/`minio`) via `environment:` — le reste (clés API, etc.) est
-chargé depuis `backend/.env` via `env_file:`. `backend/.dockerignore` exclut `.env`/`.env.local`
-de l'image (ne jamais bake un secret dans l'image ; il est injecté à l'exécution par
-`docker-compose`).
-
-Continuer à lancer `uvicorn` nativement sur Windows reste possible pour tout ce qui ne touche
-pas Postgres (le reste du pipeline — Redis, MinIO, MCP Power BI — fonctionne nativement sans
-problème, confirmé sur plusieurs sessions).
+`app/db.py`, `app/models/base.py`, `app/models/semantic_field_embedding.py`, `alembic.ini` et
+`migrations/` ont été supprimés avec cette migration (plus aucun code ne les utilise) ; les
+dépendances `sqlalchemy`/`asyncpg`/`psycopg2-binary`/`alembic`/`pgvector` ont été retirées de
+`pyproject.toml`. Le service `postgres` reste présent dans `docker-compose.yml` pour
+l'architecture prévue (auth/multi-tenant, cf. `CLAUDE.md`), mais n'est plus sur le chemin du
+RAG — `docker compose up -d` (sans le service `postgres`) et un `uvicorn` natif suffisent pour
+tout faire fonctionner, RAG inclus.
 
 ### Modèle d'embedding
 
@@ -280,29 +277,26 @@ problème, confirmé sur plusieurs sessions).
 faute d'alternative déjà configurée dans le repo ; `SCHEMA_RAG_EMBEDDING_MODEL` reste
 overridable si besoin.
 
-### Schéma pgvector (`semantic_field_embeddings`)
+### Format de stockage Redis
 
-Aucune infrastructure SQLAlchemy/Alembic n'existait avant cette session (dépendances déjà
-déclarées dans `pyproject.toml` mais jamais câblées) — bootstrap complet : `app/db.py`
-(moteur async), `app/models/base.py` + `app/models/semantic_field_embedding.py`, `alembic.ini` +
-`migrations/`.
+Une clé par (tenant, modèle) — `schema_rag:fields:{tenant_id}:{model_id}` — contenant la liste
+JSON complète des champs indexés (TTL `SCHEMA_RAG_HASH_TTL_SECONDS`, 30 jours) :
 
-| Colonne | Type | Rôle |
-|---|---|---|
-| `id` | UUID (PK) | |
-| `tenant_id`, `model_id` | String | `model_id` = `pbix_file_name` — **pas** `session_id` : l'index et les corrections humaines doivent survivre à travers plusieurs sessions de chat sur le même fichier Power BI, pas être reconstruits à chaque nouvelle session |
-| `qualified_name` | String | `"Table[Colonne]"` / `"[Mesure]"` / `"TableA[ColA]->TableB[ColB]"` pour les relations |
-| `object_type` | String | `table`\|`column`\|`measure`\|`relationship` |
-| `parent_table` | String? | Table propriétaire (colonnes uniquement) |
-| `description` | String | Description du modèle, ou validée par CP1 |
-| `embedding` | `vector(1536)` | pgvector |
-| `human_verified` | Boolean | `true` si confirmé/corrigé via CP1 — jamais réécrit par une réindexation |
-| `confidence` | Float | 0.95 (description présente), 0.60 (absente), 1.0 (human_verified) |
-| `updated_at` | timestamptz | |
+| Champ | Rôle |
+|---|---|
+| `qualified_name` | `"Table[Colonne]"` / `"[Mesure]"` / `"TableA[ColA]->TableB[ColB]"` pour les relations |
+| `object_type` | `table`\|`column`\|`measure`\|`relationship` |
+| `parent_table` | Table propriétaire (colonnes uniquement), sinon `null` |
+| `description` | Description du modèle, ou validée par CP1 |
+| `embedding` | Vecteur 1536-d, liste JSON de floats |
+| `human_verified` | `true` si confirmé/corrigé via CP1 — jamais réécrit par une réindexation |
+| `confidence` | 0.6 (description présente), 0.3 (absente), 1.0 (human_verified) |
+| `is_temporal` | Calculé une fois à l'indexation (voir "Retrieval hybride" ci-dessous) |
 
-Contrainte d'unicité `(tenant_id, model_id, qualified_name)`. Pas d'index ANN (ivfflat/hnsw) —
-un modèle Power BI compte typiquement quelques dizaines à ~200 champs, un scan séquentiel avec
-l'opérateur `<=>` (cosine) suffit largement.
+Une clé séparée (`schema_rag:hash:{tenant_id}:{model_id}`) stocke le hash structurel du
+dernier schéma indexé — permet de sauter une réindexation complète si le schéma n'a pas changé
+(`compute_model_hash`, volontairement sans les descriptions : une correction CP1 seule ne doit
+pas forcer une réindexation).
 
 ### `k` par défaut : 15
 
@@ -332,15 +326,16 @@ dans le top 15, alors qu'ils sont indispensables au `GROUP BY` DAX correct). Cor
    `week`, `semaine`...) — persisté plutôt que re-calculé pour rester correct même si un futur
    retrieval ne repasse pas par `_flatten_fields`.
 
-**Validé contre le vrai pgvector** (voir section Docker ci-dessous) : pour "évolution des ventes
-par mois", `Calendar Lookup` (table + 16 colonnes `Date`/`Month`/`Year`/...) et la relation
-`Sales Data[OrderDate]->Calendar Lookup[Date]` sont maintenant bien présents dans le résultat —
-absents avant ce fix.
+**Validé en conditions réelles** : pour "évolution des ventes par mois", `Calendar Lookup`
+(table + 16 colonnes `Date`/`Month`/`Year`/...) et la relation `Sales Data[OrderDate]->Calendar
+Lookup[Date]` sont maintenant bien présents dans le résultat — absents avant ce fix.
 
 ### Validation réelle contre AdventureWorks
 
 Résultats sur le schéma réel (147 champs indexables, AdventureWorks), **retrieval sémantique
-pur** (avant boost hybride) :
+pur** (avant boost hybride) — caractéristiques de retrieval identiques que le stockage soit
+pgvector (implémentation initiale) ou Redis (implémentation actuelle) : mêmes embeddings,
+même calcul cosinus, seul le moteur de stockage/calcul change :
 
 - **"ventes par catégorie"** : `[Total Sales]` (mesure) en tête, puis `Product Categories
   Lookup` (table + colonnes `CategoryName`/`ProductCategoryKey`), puis la relation de jointure
@@ -355,11 +350,10 @@ pur** (avant boost hybride) :
 
 ### Fallback schéma complet
 
-Jamais déclenché sur les cas réels testés (retrieval toujours non vide, y compris contre le
-vrai pgvector — voir section Docker). Les seuls déclenchements observés sont dans les tests
-unitaires où l'échec est simulé exprès (panne d'embedding, panne DB). En usage réel, le
-fallback ne se déclenchera que si pgvector est indisponible ou si le modèle n'a jamais été
-indexé.
+Jamais déclenché sur les cas réels testés (retrieval toujours non vide). Les seuls
+déclenchements observés sont dans les tests unitaires où l'échec est simulé exprès (panne
+d'embedding, panne Redis). En usage réel, le fallback ne se déclenchera que si Redis est
+indisponible ou si le modèle n'a jamais été indexé.
 
 ### Autres limitations connues (v1, première itération)
 

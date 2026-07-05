@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 
+import numpy as np
 import structlog
-from sqlalchemy import delete, func, select
-from sqlalchemy.dialects.postgresql import insert
 
 from app.config import settings
-from app.db import AsyncSessionLocal
-from app.models.semantic_field_embedding import SemanticFieldEmbedding
 from app.services.cache import get_cache, set_cache
 from app.services.llm import call_embedding
 
 logger = structlog.get_logger(__name__)
 
 _HASH_CACHE_PREFIX = "schema_rag:hash:"
+_FIELDS_CACHE_PREFIX = "schema_rag:fields:"
 
 # ── Détection temporelle (retrieval hybride, voir retrieve_relevant_fields) ────
 
@@ -40,19 +39,30 @@ _TEMPORAL_QUESTION_KEYWORDS = [
 ]
 
 
+def _fold_accents(text: str) -> str:
+    """Retire les accents (é→e, à→a...) pour un matching de mots-clés insensible aux
+    accents — de nombreux utilisateurs tapent sans accents ("evolution" au lieu
+    d'"évolution"). Les deux listes ci-dessus contenaient déjà quelques doublons manuels
+    accentué/non-accentué ("période"/"periode", "évolution"/"evolution") ajoutés au coup par
+    coup ; le folding généralise la protection à tous les mots-clés sans avoir à deviner
+    lesquels seront tapés sans accent."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def _is_temporal_field(qualified_name: str, parent_table: str | None, dtype: str) -> bool:
     """Heuristique combinée : dtype réel (fiable, disponible seulement à l'indexation)
     OU nom de table/champ évoquant un calendrier (capture aussi les colonnes calendrier
     typées Int64/String, ex: "Month" en Int64 dans AdventureWorks)."""
     if dtype.lower() in _TEMPORAL_DTYPES:
         return True
-    haystack = f"{qualified_name} {parent_table or ''}".lower()
-    return any(kw in haystack for kw in _TEMPORAL_FIELD_KEYWORDS)
+    haystack = _fold_accents(f"{qualified_name} {parent_table or ''}".lower())
+    return any(_fold_accents(kw) in haystack for kw in _TEMPORAL_FIELD_KEYWORDS)
 
 
 def _question_has_temporal_marker(question: str) -> bool:
-    q = question.lower()
-    return any(kw in q for kw in _TEMPORAL_QUESTION_KEYWORDS)
+    q = _fold_accents(question.lower())
+    return any(_fold_accents(kw) in q for kw in _TEMPORAL_QUESTION_KEYWORDS)
 
 
 # ── Helpers de transformation semantic_model_info ──────────────────────────────
@@ -164,6 +174,19 @@ def _hash_cache_key(tenant_id: str, model_id: str) -> str:
     return f"{_HASH_CACHE_PREFIX}{tenant_id}:{model_id}"
 
 
+def _fields_cache_key(tenant_id: str, model_id: str) -> str:
+    return f"{_FIELDS_CACHE_PREFIX}{tenant_id}:{model_id}"
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    a_arr = np.asarray(a, dtype=np.float64)
+    b_arr = np.asarray(b, dtype=np.float64)
+    denom = np.linalg.norm(a_arr) * np.linalg.norm(b_arr)
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a_arr, b_arr) / denom)
+
+
 # ── Indexation ──────────────────────────────────────────────────────────────────
 
 
@@ -172,14 +195,22 @@ async def index_schema(
     model_id: str,
     semantic_model_info: dict,
 ) -> dict:
-    """Indexe (ou réutilise) le schéma sémantique Power BI dans pgvector.
+    """Indexe (ou réutilise) le schéma sémantique Power BI dans Redis (embeddings + méta).
+
+    Stockage Redis plutôt que Postgres/pgvector : sur Windows + Docker Desktop, un backend
+    lancé nativement (requis pour le serveur MCP Power BI — cf. README.md, section RAG
+    schéma sémantique) ne peut pas atteindre le Postgres dockerisé, alors que Redis y est
+    déjà utilisé sans problème partout ailleurs dans ce projet. À l'échelle d'un seul modèle
+    Power BI (au plus quelques centaines de champs), une recherche cosinus linéaire en
+    Python est tout aussi exacte qu'un index pgvector non approximatif, pour un coût
+    négligeable (millisecondes) — voir _cosine_similarity / retrieve_relevant_fields.
 
     Compare un hash structurel à celui stocké en Redis (par tenant+modèle, pas par
     session — l'index doit survivre à travers plusieurs sessions de chat sur le même
     fichier Power BI) :
     - Hash identique → skip la réindexation complète (ne touche à rien).
     - Hash différent → réindexe, mais préserve intégralement les entrées
-      human_verified=true déjà en base (ne jamais écraser une description validée par
+      human_verified=true déjà stockées (ne jamais écraser une description validée par
       un humain avec une description vide issue d'un nouveau fetch MCP).
 
     Ne bloque jamais le pipeline : les erreurs sont catchées et loggées, jamais levées —
@@ -190,83 +221,62 @@ async def index_schema(
         {"reindexed": bool, "n_fields": int, "hash": str}
     """
     new_hash = compute_model_hash(semantic_model_info)
-    cache_key = _hash_cache_key(tenant_id, model_id)
+    hash_key = _hash_cache_key(tenant_id, model_id)
+    fields_key = _fields_cache_key(tenant_id, model_id)
 
     try:
-        cached = await get_cache(cache_key)
+        cached = await get_cache(hash_key)
         if cached and cached.get("hash") == new_hash:
             logger.info("schema_rag_hash_unchanged", tenant_id=tenant_id, model_id=model_id)
             return {"reindexed": False, "n_fields": 0, "hash": new_hash}
 
         fields = _flatten_fields(semantic_model_info)
-        qualified_names = {f["qualified_name"] for f in fields}
 
-        async with AsyncSessionLocal() as session:
-            existing_verified = await session.execute(
-                select(SemanticFieldEmbedding.qualified_name).where(
-                    SemanticFieldEmbedding.tenant_id == tenant_id,
-                    SemanticFieldEmbedding.model_id == model_id,
-                    SemanticFieldEmbedding.human_verified.is_(True),
-                )
+        existing = await get_cache(fields_key)
+        existing_by_name = {
+            f["qualified_name"]: f for f in (existing.get("fields", []) if existing else [])
+        }
+        verified_by_name = {
+            name: f for name, f in existing_by_name.items() if f.get("human_verified")
+        }
+
+        to_embed = [f for f in fields if f["qualified_name"] not in verified_by_name]
+        texts = [_embedding_text(f) for f in to_embed]
+        vectors = await call_embedding(texts) if texts else []
+
+        new_stored_fields: list[dict] = []
+        for field, vector in zip(to_embed, vectors):
+            new_stored_fields.append(
+                {
+                    "qualified_name": field["qualified_name"],
+                    "object_type": field["object_type"],
+                    "parent_table": field["parent_table"],
+                    "description": field["description"],
+                    "embedding": vector,
+                    "human_verified": False,
+                    "confidence": 0.6 if field["description"] else 0.3,
+                    "is_temporal": field["is_temporal"],
+                }
             )
-            verified_names = {row[0] for row in existing_verified.all()}
 
-            to_embed = [f for f in fields if f["qualified_name"] not in verified_names]
-            texts = [_embedding_text(f) for f in to_embed]
-            vectors = await call_embedding(texts) if texts else []
+        # Préserve toutes les entrées human_verified telles quelles, y compris si le champ
+        # a disparu du nouveau schéma dans ce cycle (cohérent avec le comportement pgvector
+        # précédent : ne jamais supprimer une entrée validée humainement, même orpheline).
+        preserved = list(verified_by_name.values())
 
-            for field, vector in zip(to_embed, vectors):
-                stmt = insert(SemanticFieldEmbedding).values(
-                    tenant_id=tenant_id,
-                    model_id=model_id,
-                    qualified_name=field["qualified_name"],
-                    object_type=field["object_type"],
-                    parent_table=field["parent_table"],
-                    description=field["description"],
-                    embedding=vector,
-                    human_verified=False,
-                    confidence=0.6 if field["description"] else 0.3,
-                    is_temporal=field["is_temporal"],
-                )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["tenant_id", "model_id", "qualified_name"],
-                    set_={
-                        "object_type": stmt.excluded.object_type,
-                        "parent_table": stmt.excluded.parent_table,
-                        "description": stmt.excluded.description,
-                        "embedding": stmt.excluded.embedding,
-                        "confidence": stmt.excluded.confidence,
-                        "is_temporal": stmt.excluded.is_temporal,
-                        "updated_at": func.now(),
-                    },
-                    # Ne réécrit jamais une ligne human_verified=true (garde-fou supplémentaire
-                    # au-delà du filtre `to_embed` ci-dessus, en cas de course entre 2 indexations).
-                    where=SemanticFieldEmbedding.human_verified.is_(False),
-                )
-                await session.execute(stmt)
+        stored_fields = new_stored_fields + preserved
 
-            # Supprime les entrées non-vérifiées devenues obsolètes (champ disparu du nouveau
-            # schéma) — jamais les entrées human_verified, même orphelines.
-            if qualified_names:
-                await session.execute(
-                    delete(SemanticFieldEmbedding).where(
-                        SemanticFieldEmbedding.tenant_id == tenant_id,
-                        SemanticFieldEmbedding.model_id == model_id,
-                        SemanticFieldEmbedding.human_verified.is_(False),
-                        SemanticFieldEmbedding.qualified_name.notin_(qualified_names),
-                    )
-                )
-
-            await session.commit()
-
-        await set_cache(cache_key, {"hash": new_hash}, ttl=settings.schema_rag_hash_ttl_seconds)
+        await set_cache(
+            fields_key, {"fields": stored_fields}, ttl=settings.schema_rag_hash_ttl_seconds
+        )
+        await set_cache(hash_key, {"hash": new_hash}, ttl=settings.schema_rag_hash_ttl_seconds)
         logger.info(
             "schema_rag_indexed",
             tenant_id=tenant_id,
             model_id=model_id,
             n_fields=len(fields),
             n_embedded=len(to_embed),
-            n_preserved_verified=len(verified_names),
+            n_preserved_verified=len(preserved),
         )
         return {"reindexed": True, "n_fields": len(fields), "hash": new_hash}
     except Exception as exc:
@@ -280,12 +290,14 @@ async def index_schema(
 _MAX_TEMPORAL_BOOST_FIELDS = 30
 
 
-def _row_to_field(row: SemanticFieldEmbedding) -> dict:
+def _stored_to_field(stored: dict) -> dict:
+    """Forme retournée à l'appelant (DataAgent) — jamais l'embedding ni les métadonnées
+    internes, seulement ce dont la génération DAX a besoin."""
     return {
-        "qualified_name": row.qualified_name,
-        "object_type": row.object_type,
-        "parent_table": row.parent_table,
-        "description": row.description,
+        "qualified_name": stored["qualified_name"],
+        "object_type": stored["object_type"],
+        "parent_table": stored["parent_table"],
+        "description": stored["description"],
     }
 
 
@@ -297,9 +309,10 @@ async def retrieve_relevant_fields(
 ) -> list[dict]:
     """Retourne les k champs de schéma les plus pertinents pour `question`.
 
-    Recherche par similarité cosine dans pgvector. Ne bloque JAMAIS la génération DAX :
-    retourne une liste vide (jamais d'exception) si l'embedding échoue, si la requête
-    pgvector échoue, ou si aucune entrée n'existe encore pour ce modèle — l'appelant
+    Recherche par similarité cosinus (Python/numpy) sur les embeddings stockés en Redis —
+    voir index_schema pour le pourquoi de ce choix de stockage. Ne bloque JAMAIS la
+    génération DAX : retourne une liste vide (jamais d'exception) si l'embedding échoue, si
+    la lecture Redis échoue, ou si aucune entrée n'existe encore pour ce modèle — l'appelant
     (DataAgent) doit alors retomber sur le schéma complet.
 
     Retrieval hybride : le retrieval sémantique pur rate systématiquement les champs
@@ -320,50 +333,38 @@ async def retrieve_relevant_fields(
         return []
 
     try:
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(SemanticFieldEmbedding)
-                .where(
-                    SemanticFieldEmbedding.tenant_id == tenant_id,
-                    SemanticFieldEmbedding.model_id == model_id,
+        cached = await get_cache(_fields_cache_key(tenant_id, model_id))
+        stored_fields: list[dict] = cached.get("fields", []) if cached else []
+
+        scored = [
+            (s, _cosine_similarity(query_vector, s["embedding"]))
+            for s in stored_fields
+            if s.get("embedding")
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        fields = [_stored_to_field(s) for s, _score in scored[:_k]]
+
+        if _question_has_temporal_marker(question):
+            try:
+                temporal_candidates = [s for s in stored_fields if s.get("is_temporal")][
+                    :_MAX_TEMPORAL_BOOST_FIELDS
+                ]
+                seen = {f["qualified_name"] for f in fields}
+                n_added = 0
+                for stored in temporal_candidates:
+                    field = _stored_to_field(stored)
+                    if field["qualified_name"] not in seen:
+                        fields.append(field)
+                        seen.add(field["qualified_name"])
+                        n_added += 1
+                logger.info(
+                    "schema_rag_temporal_boost_applied",
+                    question=question,
+                    n_temporal_candidates=len(temporal_candidates),
+                    n_added=n_added,
                 )
-                .order_by(SemanticFieldEmbedding.embedding.cosine_distance(query_vector))
-                .limit(_k)
-            )
-            result = await session.execute(stmt)
-            rows = result.scalars().all()
-            fields = [_row_to_field(r) for r in rows]
-
-            if _question_has_temporal_marker(question):
-                try:
-                    temporal_stmt = (
-                        select(SemanticFieldEmbedding)
-                        .where(
-                            SemanticFieldEmbedding.tenant_id == tenant_id,
-                            SemanticFieldEmbedding.model_id == model_id,
-                            SemanticFieldEmbedding.is_temporal.is_(True),
-                        )
-                        .limit(_MAX_TEMPORAL_BOOST_FIELDS)
-                    )
-                    temporal_result = await session.execute(temporal_stmt)
-                    temporal_rows = temporal_result.scalars().all()
-
-                    seen = {f["qualified_name"] for f in fields}
-                    n_added = 0
-                    for row in temporal_rows:
-                        field = _row_to_field(row)
-                        if field["qualified_name"] not in seen:
-                            fields.append(field)
-                            seen.add(field["qualified_name"])
-                            n_added += 1
-                    logger.info(
-                        "schema_rag_temporal_boost_applied",
-                        question=question,
-                        n_temporal_candidates=len(temporal_rows),
-                        n_added=n_added,
-                    )
-                except Exception as exc:
-                    logger.warning("schema_rag_temporal_boost_failed", error=str(exc))
+            except Exception as exc:
+                logger.warning("schema_rag_temporal_boost_failed", error=str(exc))
     except Exception as exc:
         logger.warning("schema_rag_retrieval_failed", error=str(exc))
         return []
@@ -387,35 +388,36 @@ async def update_field_from_hitl(
     champ inconnu ne doit pas faire échouer la reprise HITL.
     """
     try:
+        fields_key = _fields_cache_key(tenant_id, model_id)
+        cached = await get_cache(fields_key)
+        stored_fields: list[dict] = cached.get("fields", []) if cached else []
+
+        target = next(
+            (f for f in stored_fields if f["qualified_name"] == qualified_name), None
+        )
+        if target is None:
+            logger.warning(
+                "schema_rag_hitl_field_not_found",
+                tenant_id=tenant_id,
+                model_id=model_id,
+                qualified_name=qualified_name,
+            )
+            return False
+
         vector = (
             await call_embedding(
                 [_embedding_text({"qualified_name": qualified_name, "dtype": "", "description": verified_description})]
             )
         )[0]
 
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(SemanticFieldEmbedding).where(
-                    SemanticFieldEmbedding.tenant_id == tenant_id,
-                    SemanticFieldEmbedding.model_id == model_id,
-                    SemanticFieldEmbedding.qualified_name == qualified_name,
-                )
-            )
-            row = result.scalar_one_or_none()
-            if row is None:
-                logger.warning(
-                    "schema_rag_hitl_field_not_found",
-                    tenant_id=tenant_id,
-                    model_id=model_id,
-                    qualified_name=qualified_name,
-                )
-                return False
+        target["description"] = verified_description
+        target["embedding"] = vector
+        target["human_verified"] = True
+        target["confidence"] = 1.0
 
-            row.description = verified_description
-            row.embedding = vector
-            row.human_verified = True
-            row.confidence = 1.0
-            await session.commit()
+        await set_cache(
+            fields_key, {"fields": stored_fields}, ttl=settings.schema_rag_hash_ttl_seconds
+        )
 
         logger.info("schema_rag_hitl_updated", qualified_name=qualified_name)
         return True

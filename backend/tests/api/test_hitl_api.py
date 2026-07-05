@@ -232,3 +232,30 @@ async def test_delete_review_rejects_report():
     assert final_state["status"] == "error"
     assert final_state["hitl_pending"] is False
     assert any("rejeté" in e for e in final_state.get("errors", []))
+
+
+@pytest.mark.asyncio
+async def test_run_resume_records_turn_after_completion():
+    """_run_resume doit aussi appeler maybe_record_turn() une fois la reprise terminée —
+    une question ayant déclenché un HITL (CP3 par ex.) doit elle aussi rejoindre la mémoire
+    de conversation une fois résolue, pas seulement les questions sans HITL."""
+    from app.api.v1.hitl import _run_resume
+
+    final_state = {
+        "status": "complete",
+        "setup_only": False,
+        "narrative": "Bikes domine avec 23.6M€.",
+        "tenant_id": "tenant-test",
+        "session_id": "session-test",
+        "prompt": "Quelle catégorie a le plus de ventes ?",
+    }
+    pipeline = MagicMock(ainvoke=AsyncMock(return_value=final_state))
+    mock_record = AsyncMock()
+
+    with (
+        patch("app.api.v1.hitl.save_report_state", AsyncMock()),
+        patch("app.api.v1.hitl.maybe_record_turn", mock_record),
+    ):
+        await _run_resume(pipeline, {"report_id": "report-test"}, "report-test")
+
+    mock_record.assert_awaited_once_with(final_state)

@@ -12,6 +12,7 @@ from app.agents.base_agent import BaseAgent
 from app.config import settings
 from app.pipeline.state import PipelineState
 from app.services.cache import get_cache, make_cache_key, set_cache
+from app.services.conversation_memory import format_history_for_prompt
 from app.services.llm import call_llm_json
 from app.services.powerbi_local_mcp import PowerBIDaxExecutionError, get_powerbi_client
 from app.services.schema_rag import retrieve_relevant_fields
@@ -102,14 +103,25 @@ def _auto_join_hints(dfs: dict[str, pd.DataFrame]) -> str:
     return "\n".join(hints) if hints else "  (aucune détectée automatiquement)"
 
 
-def _build_sql_prompt(user_prompt: str, schema_summary: str, dfs: dict) -> str:
+def _build_sql_prompt(
+    user_prompt: str, schema_summary: str, dfs: dict, chat_history: list[dict] | None = None
+) -> str:
     """Prompt LLM pour la génération SQL — ne contient que des noms de colonnes, pas de valeurs."""
     table_list = "\n".join(
         f"  - {name}: colonnes = {list(df.columns)}" for name, df in dfs.items()
     )
     join_hints = _auto_join_hints(dfs)
+    history_block = format_history_for_prompt(chat_history or [])
+    history_section = (
+        f"Questions précédentes de cette conversation (résumées, pour résoudre les "
+        f"références comme \"cette catégorie\"/\"ce mois\" — ignore cette section si la "
+        f"demande actuelle est autonome) :\n{history_block}\n\n"
+        if history_block
+        else ""
+    )
     return (
         f"Demande utilisateur : {user_prompt}\n\n"
+        f"{history_section}"
         f"Schéma :\n{schema_summary}\n\n"
         f"Tables disponibles dans DuckDB (noms exacts à utiliser dans FROM/JOIN) :\n{table_list}\n\n"
         f"Clés de jointure détectées (colonnes partagées entre tables) :\n{join_hints}\n\n"
@@ -142,17 +154,36 @@ def _pbi_table_name(ref: str) -> str:
 
 
 def _build_dax_schema_summary(state: PipelineState) -> str:
-    """Résumé du modèle sémantique Power BI (tables/colonnes/mesures/relations), limité à 2500 chars."""
-    lines: list[str] = []
+    """Résumé du modèle sémantique Power BI (mesures/tables/colonnes/relations), limité à 6000 chars.
+
+    Les mesures sont listées EN PREMIER, avant le détail table par table — pas dans l'ordre
+    d'itération d'origine (où "Mesures DAX disponibles" arrive après toutes les tables).
+    Régression réelle (AdventureWorks, RAG indisponible donc ce repli complet est utilisé) :
+    sur un modèle à nombreuses tables/colonnes, la troncature coupait la section mesures
+    entièrement AVANT qu'elle apparaisse, laissant le LLM générer SUMMARIZECOLUMNS(...,
+    [Revenue]) en traitant une colonne brute comme une mesure, faute de savoir laquelle des
+    58 mesures réelles existait. Mettre les mesures en premier garantit qu'une troncature
+    coupe en priorité le détail des colonnes (moins critique), jamais la liste des mesures.
+    """
     files_meta = state.get("metadata", {}).get("files", {})
 
+    measure_lines: list[str] = []
+    table_lines: list[str] = []
     for ref, meta in files_meta.items():
         table_name = _pbi_table_name(ref)
-        lines.append("Mesures DAX disponibles :" if table_name == "__measures__" else f"Table: {table_name}")
+        if table_name == "__measures__":
+            measure_lines.append("Mesures DAX disponibles :")
+            for col, info in meta.get("columns", {}).items():
+                semantic = info.get("semantic_name", col)
+                measure_lines.append(f"  - {col}: {semantic}")
+            continue
+        table_lines.append(f"Table: {table_name}")
         for col, info in meta.get("columns", {}).items():
             semantic = info.get("semantic_name", col)
             marker = "[mesure]" if info.get("kind") == "measure" else f"[{info.get('type', 'unknown')}]"
-            lines.append(f"  - {col}: {semantic} {marker}")
+            table_lines.append(f"  - {col}: {semantic} {marker}")
+
+    lines = measure_lines + table_lines
 
     relations = state.get("semantic_model_info", {}).get("relations", [])
     if relations:
@@ -166,13 +197,13 @@ def _build_dax_schema_summary(state: PipelineState) -> str:
             to_col = rel.get("toColumn", rel.get("col_b", "?"))
             lines.append(f"  {from_table}.{from_col} -> {to_table}.{to_col}")
 
-    return "\n".join(lines)[:2500]
+    return "\n".join(lines)[:6000]
 
 
 def _build_dax_schema_summary_from_rag(fields: list[dict]) -> str:
     """Résumé du schéma construit depuis un sous-ensemble RAG (retrieve_relevant_fields),
-    au même format que _build_dax_schema_summary — colonnes groupées par table, mesures et
-    relations en sections dédiées."""
+    au même format que _build_dax_schema_summary — mesures listées en premier (voir sa
+    docstring pour le pourquoi), colonnes groupées par table, relations en dernier."""
     by_table: dict[str, list[dict]] = {}
     measures: list[dict] = []
     relations: list[dict] = []
@@ -187,6 +218,13 @@ def _build_dax_schema_summary_from_rag(fields: list[dict]) -> str:
         # object_type == "table" : entrée informationnelle seule, rien à lister dessous
 
     lines: list[str] = []
+    if measures:
+        lines.append("Mesures DAX disponibles :")
+        for m in measures:
+            name = m["qualified_name"].strip("[]")
+            desc = f" — {m['description']}" if m.get("description") else ""
+            lines.append(f"  - {name}{desc}")
+
     for table_name, cols in by_table.items():
         lines.append(f"Table: {table_name}")
         for c in cols:
@@ -195,25 +233,29 @@ def _build_dax_schema_summary_from_rag(fields: list[dict]) -> str:
             desc = f" — {c['description']}" if c.get("description") else ""
             lines.append(f"  - {field_name}{desc}")
 
-    if measures:
-        lines.append("Mesures DAX disponibles :")
-        for m in measures:
-            name = m["qualified_name"].strip("[]")
-            desc = f" — {m['description']}" if m.get("description") else ""
-            lines.append(f"  - {name}{desc}")
-
     if relations:
         lines.append("\nRelations du modèle :")
         for r in relations:
             lines.append(f"  {r['qualified_name']}")
 
-    return "\n".join(lines)[:2500]
+    return "\n".join(lines)[:6000]
 
 
-def _build_dax_prompt(user_prompt: str, schema_summary: str) -> str:
+def _build_dax_prompt(
+    user_prompt: str, schema_summary: str, chat_history: list[dict] | None = None
+) -> str:
     """Prompt LLM pour la génération DAX — ne contient que des noms de tables/colonnes/mesures."""
+    history_block = format_history_for_prompt(chat_history or [])
+    history_section = (
+        f"Questions précédentes de cette conversation (résumées, pour résoudre les "
+        f"références comme \"cette catégorie\"/\"ce mois\" — ignore cette section si la "
+        f"demande actuelle est autonome) :\n{history_block}\n\n"
+        if history_block
+        else ""
+    )
     return (
         f"Demande utilisateur : {user_prompt}\n\n"
+        f"{history_section}"
         f"Modèle sémantique Power BI :\n{schema_summary}\n\n"
         "Génère des requêtes DAX qui répondent à la demande.\n"
         "Règles :\n"
@@ -232,6 +274,24 @@ def _build_dax_prompt(user_prompt: str, schema_summary: str) -> str:
         "'Calendrier'[MoisTri] — 'MoisTri' n'est pas dans la table résultat. "
         "Correct : SUMMARIZECOLUMNS('Calendrier'[Mois], 'Calendrier'[MoisTri], \"CA\", "
         "[Total Ventes]) ORDER BY 'Calendrier'[MoisTri]\n"
+        "  - RÈGLE CRITIQUE FILTRE vs GROUPEMENT : si la demande mentionne une valeur EXPLICITE "
+        "d'une dimension (ex: \"en 2022\", \"pour la France\", \"pour Bikes\"), c'est un FILTRE, "
+        "pas un groupement — n'ajoutez PAS cette colonne dans SUMMARIZECOLUMNS, filtrez-la via "
+        "CALCULATE sur la mesure. Sinon vous obtenez une ligne par combinaison (dimension "
+        "demandée × valeur filtrée) au lieu d'une ligne par dimension demandée. "
+        "Incorrect (\"ventes par catégorie en 2022\") : SUMMARIZECOLUMNS('Catégorie'[Nom], "
+        "'Calendrier'[Année], \"CA\", [Total Ventes]) — regroupe par année au lieu de filtrer "
+        "dessus. "
+        "Correct : SUMMARIZECOLUMNS('Catégorie'[Nom], \"CA\", CALCULATE([Total Ventes], "
+        "'Calendrier'[Année] = 2022))\n"
+        "  - RÈGLE CRITIQUE MESURE vs COLONNE : n'utilisez [NomEntreCrochets] QUE pour un nom "
+        "figurant EXACTEMENT dans la liste \"Mesures DAX disponibles\" ci-dessus. Toute autre "
+        "valeur chiffrée est une colonne d'une table — agrégez-la explicitement : "
+        "SUM('Table'[Colonne]), AVERAGE('Table'[Colonne]), etc. "
+        "Incorrect : SUMMARIZECOLUMNS('Catégorie'[Nom], \"CA\", [Revenue]) si \"Revenue\" "
+        "n'apparaît pas dans les mesures listées — DAX échoue avec \"impossible de "
+        "déterminer la valeur\". "
+        "Correct : SUMMARIZECOLUMNS('Catégorie'[Nom], \"CA\", SUM('Ventes'[Revenue]))\n"
         "  - KPI ou valeur unique : EVALUATE ROW(\"Alias\", [Mesure])\n"
         "  - Alias explicites en français entre guillemets\n\n"
         'Retourne : {"queries": [{"key": "nom_aggregat", "dax": "EVALUATE ..."}]}'
@@ -475,7 +535,7 @@ class DataAgent(BaseAgent):
         schema_summary = _build_schema_summary(state, dfs)
 
         # ── Étape C : génération SQL via LLM ──────────────────────────────────
-        sql_prompt = _build_sql_prompt(state["prompt"], schema_summary, dfs)
+        sql_prompt = _build_sql_prompt(state["prompt"], schema_summary, dfs, state.get("chat_history"))
         llm_result = await call_llm_json(
             prompt=sql_prompt,
             system=_SQL_SYSTEM_PROMPT,
@@ -546,7 +606,7 @@ class DataAgent(BaseAgent):
             queries = await self._generate_dax_native(client, state["prompt"], log)
 
         if not queries:
-            dax_prompt = _build_dax_prompt(state["prompt"], schema_summary)
+            dax_prompt = _build_dax_prompt(state["prompt"], schema_summary, state.get("chat_history"))
             llm_result = await call_llm_json(
                 prompt=dax_prompt,
                 system=_DAX_SYSTEM_PROMPT,

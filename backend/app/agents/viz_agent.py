@@ -23,6 +23,67 @@ def _is_temporal_column(col_name: str) -> bool:
     lowered = col_name.lower()
     return any(kw in lowered for kw in _TEMPORAL_COLUMN_KEYWORDS)
 
+
+# Seuils de la sélection déterministe du chart_type (cf. _select_chart_type ci-dessous).
+_MAX_PIE_CATEGORIES = 5
+_MIN_LINE_POINTS = 3
+
+
+def _col_is_numeric(rows: list[dict], col: str) -> bool:
+    """True si toutes les valeurs non nulles de la colonne sont des nombres (int/float),
+    en excluant les booléens (bool est une sous-classe d'int en Python)."""
+    values = [r.get(col) for r in rows if r.get(col) is not None]
+    if not values:
+        return False
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)
+
+
+def _select_chart_type(spec: dict, aggregates: dict, prompt_is_temporal: bool) -> str:
+    """Choisit le chart_type de façon déterministe à partir de la structure des données,
+    plutôt que de dépendre du jugement du LLM (souvent incohérent d'un insight à l'autre).
+
+    Ordre de priorité :
+      1. x temporel + assez de points → "line"
+      2. x et y tous deux numériques (deux mesures) → "scatter"
+      3. une seule colonne numérique et x = cette colonne → "histogram"
+      4. x catégoriel + peu de catégories + marqueur de part dans le titre/insight_ref → "pie"
+      5. sinon → "bar" (ou "line" si x temporel malgré peu de points, si la question porte
+         explicitement sur une évolution)
+    """
+    rows = aggregates.get(spec.get("data_key")) or []
+    cols = list(rows[0].keys()) if rows and isinstance(rows[0], dict) else []
+    x_col = spec.get("x") or ""
+    y_col = spec.get("y") or ""
+
+    # 1. Évolution temporelle
+    if x_col and _is_temporal_column(x_col) and len(rows) >= _MIN_LINE_POINTS:
+        return "line"
+
+    # 2. Corrélation entre deux mesures numériques
+    if x_col and y_col and _col_is_numeric(rows, x_col) and _col_is_numeric(rows, y_col):
+        return "scatter"
+
+    # 3. Distribution d'une seule variable numérique
+    numeric_cols = [c for c in cols if _col_is_numeric(rows, c)]
+    if len(numeric_cols) == 1 and x_col == numeric_cols[0]:
+        return "histogram"
+
+    # 4. Proportion entre catégories
+    text = f"{spec.get('title', '')} {spec.get('insight_ref', '')}".lower()
+    share_markers = ("part", "répartition", "repartition", "proportion", "share", "%", "pourcentage")
+    if (
+        x_col
+        and not _col_is_numeric(rows, x_col)
+        and len(rows) <= _MAX_PIE_CATEGORIES
+        and any(marker in text for marker in share_markers)
+    ):
+        return "pie"
+
+    # 5. Repli : bar, sauf question d'évolution explicite avec x temporel malgré peu de points
+    if x_col and _is_temporal_column(x_col) and prompt_is_temporal:
+        return "line"
+    return "bar"
+
 # ── Règles de sélection de graphique ─────────────────────────────────────────
 
 _CHART_RULES = """
@@ -184,10 +245,6 @@ class VizAgent(BaseAgent):
                 log.warning("viz_llm_error", insight=insight.get("title"), error=str(exc))
                 continue
 
-            # Normaliser chart_type
-            if spec.get("chart_type") not in _VALID_CHART_TYPES:
-                spec["chart_type"] = "bar"
-
             # ── Étape C : validation ─────────────────────────────────────────
             valid, reason = _validate_spec(spec, aggregates)
             if not valid:
@@ -197,16 +254,17 @@ class VizAgent(BaseAgent):
                 ]
                 continue
 
-            # Override déterministe : question d'évolution + colonne x temporelle → "line",
-            # peu importe ce que le LLM a choisi (voir prompt_is_temporal ci-dessus).
-            if prompt_is_temporal and _is_temporal_column(spec.get("x", "")) and spec["chart_type"] != "line":
+            # Choix déterministe du chart_type à partir de la structure des données —
+            # remplace le jugement du LLM, incohérent d'un insight à l'autre (cf. _select_chart_type).
+            llm_choice = spec.get("chart_type")
+            spec["chart_type"] = _select_chart_type(spec, aggregates, prompt_is_temporal)
+            if spec["chart_type"] != llm_choice:
                 log.info(
-                    "viz_chart_type_forced_line",
-                    original=spec["chart_type"],
-                    x=spec.get("x"),
+                    "viz_chart_type_overridden",
+                    llm_choice=llm_choice,
+                    selected=spec["chart_type"],
                     insight=insight.get("title"),
                 )
-                spec["chart_type"] = "line"
 
             # ── Étape D : appliquer couleurs ─────────────────────────────────
             spec = _apply_colors(spec, colors)
@@ -229,24 +287,18 @@ class VizAgent(BaseAgent):
                     continue
                 x_col = str_cols[0] if str_cols else cols[0]
                 y_col = numeric_cols[0]
-                is_temporal = any(
-                    t in c.lower() for c in cols for t in ("mois", "date", "month", "semaine", "year")
-                )
-                # Question d'évolution explicite → line dès qu'une colonne temporelle existe,
-                # même sur peu de points (l'utilisateur a demandé une line chart, pas au moteur
-                # de décider selon le volume de données).
-                chart_type = "line" if is_temporal and (len(rows) > 2 or prompt_is_temporal) else "bar"
-                spec = _apply_colors({
-                    "chart_type": chart_type,
+                spec = {
                     "title": key.replace("_", " ").strip().capitalize(),
                     "data_key": key,
                     "x": x_col,
                     "y": y_col,
                     "color_by": None,
                     "annotations": [],
-                }, colors)
+                }
+                spec["chart_type"] = _select_chart_type(spec, aggregates, prompt_is_temporal)
+                spec = _apply_colors(spec, colors)
                 viz_specs.append(spec)
-                log.info("viz_spec_fallback_generated", key=key, chart_type=chart_type)
+                log.info("viz_spec_fallback_generated", key=key, chart_type=spec["chart_type"])
 
         log.info("viz_specs_generated", count=len(viz_specs), fallback_ran=not insights and bool(aggregates))
         state["viz_specs"] = viz_specs

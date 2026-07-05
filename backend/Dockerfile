@@ -2,9 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# psycopg2-binary needs libpq at runtime; build tools for any source builds.
+# nodejs/npm : requis par DataAgent/MetadataAgent pour lancer le Power BI Modeling MCP
+# Server via `npx` (app/services/powerbi_local_mcp.py) — absent de l'image de base. Notez
+# que ce serveur MCP refuse toute connexion Analysis Services locale depuis un runtime .NET
+# Linux ("This feature is supported for a .NET Core client only on Windows systems.") —
+# nodejs reste installé pour permettre au serveur de démarrer, mais connect_to_desktop_file
+# échouera toujours depuis ce conteneur (voir README.md, section RAG schéma sémantique).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libpq-dev \
+    build-essential nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .

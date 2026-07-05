@@ -258,7 +258,12 @@
       "Bash(echo \"TSC:$?\")",
       "Bash(powershell -Command \"\\(Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue\\).OwningProcess\")",
       "Bash(powershell -Command \"Stop-Process -Id 20352 -Force\")",
-      "Bash(nohup /c/BrxAI/venv/Scripts/python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000)"
+      "Bash(nohup /c/BrxAI/venv/Scripts/python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000)",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose exec -T redis redis-cli GET \"report:7b74543e-a603-4520-b6cb-73134d200ff6\")",
+      "Read(//c/Users/gbami/AppData/Local/Temp/**)",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose exec -T redis redis-cli GET \"report:9f346269-3083-4fc7-93d8-b7ccfa0c552c\")",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose exec -T redis redis-cli GET \"report:52c5b9ce-bfb8-4faa-8325-6f742f451542\")",
+      "Bash(python3 *)"
     ]
   }
 }

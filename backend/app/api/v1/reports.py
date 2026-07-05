@@ -10,6 +10,7 @@ from fastapi import APIRouter, Form, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse, Response
 
 from app.pipeline.state import initial_state
+from app.services.conversation_memory import get_conversation_history, maybe_record_turn
 from app.services.report_store import get_report_state, save_report_state
 from app.services.report_store import list_sessions as _list_sessions_store
 from app.services.storage import upload_file
@@ -113,6 +114,7 @@ async def generate_report(
     )
     state["status"] = "running"
     state["session_id"] = _session_id
+    state["chat_history"] = await get_conversation_history(_tenant_id, _session_id)
 
     # Réutiliser metadata+schema d'un rapport précédent (court-circuite CP1+CP2)
     if base_report_id:
@@ -209,6 +211,7 @@ async def generate_report_powerbi(
     )
     state["status"] = "running"
     state["session_id"] = _session_id
+    state["chat_history"] = await get_conversation_history(_tenant_id, _session_id)
 
     # Réutiliser metadata + semantic_model_info d'un rapport précédent (court-circuite CP1)
     if base_report_id:
@@ -245,6 +248,7 @@ async def _run_pipeline(pipeline, state: dict, report_id: str) -> None:
         final_state = await pipeline.ainvoke(state)
         if isinstance(final_state, dict):
             await save_report_state(report_id, final_state)
+            await maybe_record_turn(final_state)
     except Exception as exc:
         logger.error("pipeline_background_error", report_id=report_id, error=str(exc))
         await _mark_error(report_id, str(exc))
@@ -364,6 +368,7 @@ async def send_session_message(
     )
     state["status"] = "running"
     state["session_id"] = session_id
+    state["chat_history"] = await get_conversation_history(_DEMO_TENANT, session_id)
 
     await save_report_state(report_id, dict(state))
 

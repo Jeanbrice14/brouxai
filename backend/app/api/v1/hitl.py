@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.models.report import HITLReviewRequest
 from app.pipeline.checkpoints import resume_pipeline
+from app.services.conversation_memory import maybe_record_turn
 from app.services.report_store import get_report_state, save_report_state
 from app.services.schema_rag import update_field_from_hitl
 
@@ -155,6 +156,7 @@ async def _run_resume(pipeline, state: dict, report_id: str) -> None:
         final_state = await pipeline.ainvoke(state)
         if isinstance(final_state, dict):
             await save_report_state(report_id, final_state)
+            await maybe_record_turn(final_state)
     except Exception as exc:
         logger.error("resume_pipeline_error", report_id=report_id, error=str(exc))
         from app.services.report_store import get_report_state

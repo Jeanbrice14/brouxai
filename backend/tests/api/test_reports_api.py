@@ -372,3 +372,70 @@ async def test_generate_report_csv_parses_setup_only_true():
 
     assert response.status_code == 200, f"Réponse: {response.text}"
     assert captured_state.get("setup_only") is True
+
+
+# ── Mémoire de conversation (k derniers tours) ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_generate_powerbi_populates_chat_history_from_conversation_memory():
+    """state["chat_history"] doit être peuplé depuis get_conversation_history() à la
+    création du state — c'est ce qui permet à DataAgent de résoudre des références comme
+    "cette catégorie" d'un message au suivant."""
+    from app.main import app
+
+    captured_state: dict = {}
+    fake_history = [{"question": "Quelle catégorie a le plus de ventes ?", "answer_summary": "Bikes domine."}]
+
+    async def _fake_save_report_state(report_id, state):
+        captured_state.update(state)
+
+    def _fake_create_task(coro):
+        coro.close()
+        return MagicMock()
+
+    with (
+        patch("app.api.v1.reports.save_report_state", AsyncMock(side_effect=_fake_save_report_state)),
+        patch("app.api.v1.reports.get_conversation_history", AsyncMock(return_value=fake_history)),
+        patch("app.api.v1.reports._get_pipeline", return_value=MagicMock(ainvoke=AsyncMock())),
+        patch("app.api.v1.reports.asyncio.create_task", side_effect=_fake_create_task),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/reports/generate-powerbi",
+                data={
+                    "prompt": "Quel est le taux de retour pour cette catégorie ?",
+                    "pbix_file_name": "AdventureWorks",
+                    "brand_kit": "{}",
+                    "session_id": "session-memory-test",
+                },
+            )
+
+    assert response.status_code == 200, f"Réponse: {response.text}"
+    assert captured_state.get("chat_history") == fake_history
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_records_turn_after_completion():
+    """_run_pipeline doit appeler maybe_record_turn() une fois le pipeline terminé, pour
+    que le tour courant devienne disponible aux messages suivants de la session."""
+    from app.api.v1.reports import _run_pipeline
+
+    final_state = {
+        "status": "complete",
+        "setup_only": False,
+        "narrative": "Bikes domine avec 23.6M€.",
+        "tenant_id": "tenant-test",
+        "session_id": "session-test",
+        "prompt": "Quelle catégorie a le plus de ventes ?",
+    }
+    pipeline = MagicMock(ainvoke=AsyncMock(return_value=final_state))
+    mock_record = AsyncMock()
+
+    with (
+        patch("app.api.v1.reports.save_report_state", AsyncMock()),
+        patch("app.api.v1.reports.maybe_record_turn", mock_record),
+    ):
+        await _run_pipeline(pipeline, {"report_id": "report-test"}, "report-test")
+
+    mock_record.assert_awaited_once_with(final_state)

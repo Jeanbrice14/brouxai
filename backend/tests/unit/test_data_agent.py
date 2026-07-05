@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 import pytest
 
-from app.agents.data_agent import DataAgent, _strip_order_by
+from app.agents.data_agent import (
+    DataAgent,
+    _build_dax_prompt,
+    _build_dax_schema_summary,
+    _strip_order_by,
+)
 from app.pipeline.state import initial_state
 
 # ── Constantes ────────────────────────────────────────────────────────────────
@@ -127,6 +132,51 @@ async def test_never_passes_raw_data_to_llm():
     # Vérifier que le schéma structurel est présent (noms de colonnes et de tables)
     assert "ca_ht" in prompt_sent, "Le nom de colonne 'ca_ht' devrait être dans le prompt"
     assert "ventes" in prompt_sent, "Le nom de table 'ventes' devrait être dans le prompt"
+
+
+@pytest.mark.asyncio
+async def test_chat_history_included_in_sql_prompt_when_present():
+    """La mémoire de conversation (k derniers tours) doit apparaître dans le prompt SQL,
+    pour permettre de résoudre une référence comme "cette catégorie"."""
+    state = _make_state()
+    state["chat_history"] = [
+        {"question": "Quelle catégorie a le plus de ventes ?", "answer_summary": "Bikes domine avec 23.6M€."},
+    ]
+    agent = DataAgent()
+    mock_llm = AsyncMock(return_value={"queries": []})
+
+    with (
+        patch("app.agents.data_agent.read_dataframe", AsyncMock(return_value=DF_VENTES)),
+        patch("app.agents.data_agent.call_llm_json", mock_llm),
+        patch("app.agents.data_agent.get_cache", AsyncMock(return_value=None)),
+        patch("app.agents.data_agent.set_cache", AsyncMock()),
+    ):
+        await agent(state)
+
+    prompt_sent: str = mock_llm.call_args.kwargs.get("prompt") or mock_llm.call_args.args[0]
+    assert "Quelle catégorie a le plus de ventes ?" in prompt_sent
+    assert "Bikes domine avec 23.6M€." in prompt_sent
+
+
+@pytest.mark.asyncio
+async def test_no_chat_history_section_when_history_empty():
+    """Sans historique (première question de la session), aucune section de contexte
+    ne doit polluer le prompt — pas de bloc vide."""
+    state = _make_state()
+    assert state.get("chat_history") == []
+    agent = DataAgent()
+    mock_llm = AsyncMock(return_value={"queries": []})
+
+    with (
+        patch("app.agents.data_agent.read_dataframe", AsyncMock(return_value=DF_VENTES)),
+        patch("app.agents.data_agent.call_llm_json", mock_llm),
+        patch("app.agents.data_agent.get_cache", AsyncMock(return_value=None)),
+        patch("app.agents.data_agent.set_cache", AsyncMock()),
+    ):
+        await agent(state)
+
+    prompt_sent: str = mock_llm.call_args.kwargs.get("prompt") or mock_llm.call_args.args[0]
+    assert "Questions précédentes" not in prompt_sent
 
 
 @pytest.mark.asyncio
@@ -276,6 +326,35 @@ async def test_powerbi_mode_executes_generated_dax():
     fake_client.execute_dax.assert_awaited_once()
     assert result["dax_queries"], "state['dax_queries'] devrait tracer la requête exécutée"
     assert result["dax_queries"][0]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_powerbi_mode_chat_history_included_in_dax_prompt():
+    """Idem CSV : la mémoire de conversation doit apparaître dans le prompt DAX."""
+    state = _make_powerbi_state()
+    state["chat_history"] = [
+        {"question": "Quelle catégorie a le plus de ventes ?", "answer_summary": "Bikes domine avec 23.6M€."},
+    ]
+    agent = DataAgent()
+
+    fake_client = AsyncMock()
+    fake_client.execute_dax = AsyncMock(
+        return_value={"columns": ["region", "ca"], "rows": [{"region": "Nord", "ca": 12500.0}]}
+    )
+    mock_llm = AsyncMock(
+        return_value={"queries": [{"key": "ca_par_region", "dax": "EVALUATE SUMMARIZECOLUMNS('Sales'[Region], \"ca\", [Total Sales])"}]}
+    )
+
+    with (
+        patch("app.agents.data_agent.get_powerbi_client", return_value=fake_client),
+        patch("app.agents.data_agent.call_llm_json", mock_llm),
+        patch("app.agents.data_agent.retrieve_relevant_fields", AsyncMock(return_value=[])),
+    ):
+        await agent(state)
+
+    prompt_sent: str = mock_llm.call_args.kwargs.get("prompt") or mock_llm.call_args.args[0]
+    assert "Quelle catégorie a le plus de ventes ?" in prompt_sent
+    assert "Bikes domine avec 23.6M€." in prompt_sent
 
 
 @pytest.mark.asyncio
@@ -488,6 +567,79 @@ async def test_powerbi_mode_uses_rag_subset_when_available():
         "a été utilisé au lieu du sous-ensemble retrouvé."
     )
     assert "Country" not in prompt_sent
+
+
+# ── _build_dax_prompt ─────────────────────────────────────────────────────────
+
+
+def test_dax_prompt_includes_filter_vs_groupby_rule():
+    """Régression réelle : "ventes par catégorie en 2022" générait du DAX groupant par
+    Année au lieu de filtrer dessus (SUMMARIZECOLUMNS('Catégorie', 'Année', ...) au lieu
+    de filtrer Année=2022 via CALCULATE) — 7 lignes (catégorie × année) au lieu de 3,
+    empêchant même un pie chart pertinent en aval (VizAgent). Le prompt doit expliciter
+    la distinction filtre/groupement avec un exemple concret."""
+    prompt = _build_dax_prompt("Quelles sont les ventes par catégorie en 2022 ?", "Modèle : ...")
+    assert "FILTRE vs GROUPEMENT" in prompt
+    assert "CALCULATE" in prompt
+
+
+def test_dax_prompt_includes_measure_vs_column_rule():
+    """Régression réelle : "ventes totales par catégorie" générait
+    SUMMARIZECOLUMNS(..., [Revenue]) en traitant la colonne 'Revenue' (Sales Data) comme
+    une mesure — DAX échouait avec "impossible de déterminer la valeur de 'Revenue'"."""
+    prompt = _build_dax_prompt("Quelles sont les ventes totales par catégorie ?", "Modèle : ...")
+    assert "MESURE vs COLONNE" in prompt
+    assert "SUM(" in prompt
+
+
+# ── _build_dax_schema_summary ─────────────────────────────────────────────────
+
+
+def _pbi_state(files_meta: dict) -> dict:
+    return {"metadata": {"files": files_meta}, "semantic_model_info": {}}
+
+
+def test_dax_schema_summary_lists_measures_before_tables():
+    """Les mesures doivent apparaître avant le détail des tables, pas après — sinon une
+    troncature sur un modèle volumineux coupe la liste des mesures avant qu'elle apparaisse
+    (régression réelle, cf. test_dax_prompt_includes_measure_vs_column_rule)."""
+    files_meta = {
+        "powerbi://Sales Data": {
+            "columns": {"Revenue": {"semantic_name": "Revenue", "type": "Decimal"}}
+        },
+        "powerbi://__measures__": {
+            "columns": {"Total Sales": {"semantic_name": "Total des ventes"}}
+        },
+    }
+    summary = _build_dax_schema_summary(_pbi_state(files_meta))
+    measures_pos = summary.index("Mesures DAX disponibles")
+    table_pos = summary.index("Table: Sales Data")
+    assert measures_pos < table_pos, "Les mesures doivent précéder le détail des tables"
+
+
+def test_dax_schema_summary_truncation_preserves_measures():
+    """Régression réelle : sur un modèle à nombreuses tables/colonnes (AdventureWorks, 15
+    tables), la troncature à 2500 chars coupait la section "Mesures DAX disponibles"
+    (58 mesures) avant même qu'elle apparaisse — le LLM générait alors SUMMARIZECOLUMNS(...,
+    [Revenue]) en confondant une colonne brute avec une mesure. Ce test construit
+    délibérément assez de colonnes AVANT la table de mesures pour dépasser la limite de
+    troncature, et vérifie que les mesures survivent quand même."""
+    files_meta = {
+        f"powerbi://Table{i}": {
+            "columns": {
+                f"Column{j}": {"semantic_name": f"Colonne {i}.{j}", "type": "String"}
+                for j in range(20)
+            }
+        }
+        for i in range(20)
+    }
+    files_meta["powerbi://__measures__"] = {
+        "columns": {"Total Sales": {"semantic_name": "Total des ventes"}}
+    }
+    summary = _build_dax_schema_summary(_pbi_state(files_meta))
+    assert len(summary) >= 6000 - 1, "Le test doit réellement déclencher la troncature"
+    assert "Mesures DAX disponibles" in summary
+    assert "Total Sales" in summary
 
 
 # ── _strip_order_by ──────────────────────────────────────────────────────────────
