@@ -11,6 +11,7 @@ from fastapi.responses import RedirectResponse, Response
 
 from app.pipeline.state import initial_state
 from app.services.report_store import get_report_state, save_report_state
+from app.services.report_store import list_sessions as _list_sessions_store
 from app.services.storage import upload_file
 
 logger = structlog.get_logger(__name__)
@@ -41,6 +42,7 @@ async def generate_report(
     user_id: str = Form(default=""),
     dataset_refs: str = Form(default="[]"),
     base_report_id: str = Form(default=""),
+    setup_only: str = Form(default=""),
 ) -> dict:
     """Lance la génération d'un rapport.
 
@@ -48,6 +50,10 @@ async def generate_report(
     - Upload les fichiers vers MinIO
     - Lance le pipeline en background
     - Retourne immédiatement {"report_id": ..., "status": "running", "session_id": ...}
+
+    `setup_only` : connexion initiale (premier upload) sans vraie question utilisateur —
+    le pipeline s'arrête après metadata_agent (+ schema_linking_agent) au lieu de lancer
+    data_agent/insight_agent sur le prompt générique de connexion (cf. pipeline/graph.py).
     """
     # Validation prompt longueur
     if len(prompt.strip()) < 5:
@@ -103,6 +109,7 @@ async def generate_report(
         prompt=prompt.strip(),
         raw_data_refs=raw_data_refs,
         brand_kit=brand_kit_dict,
+        setup_only=setup_only.strip().lower() in ("true", "1", "yes"),
     )
     state["status"] = "running"
     state["session_id"] = _session_id
@@ -138,6 +145,97 @@ async def generate_report(
         "status": "running",
         "session_id": _session_id,
         "raw_data_refs": raw_data_refs,
+    }
+
+
+@router.post("/reports/generate-powerbi", status_code=200)
+async def generate_report_powerbi(
+    prompt: str = Form(...),
+    pbix_file_name: str = Form(...),
+    brand_kit: str = Form(default="{}"),
+    session_id: str = Form(default=""),
+    tenant_id: str = Form(default=""),
+    user_id: str = Form(default=""),
+    base_report_id: str = Form(default=""),
+    setup_only: str = Form(default=""),
+) -> dict:
+    """Lance la génération d'un rapport depuis un modèle Power BI Desktop ouvert localement.
+
+    Contrairement à /reports/generate (upload CSV/Excel), aucun fichier n'est envoyé :
+    le pipeline se connecte au fichier .pbix/.pbip déjà ouvert dans Power BI Desktop
+    via le Power BI Modeling MCP Server (recherche automatique par nom de fichier).
+
+    Nécessite Node.js/npx installé et Power BI Desktop ouvert avec `pbix_file_name` chargé.
+
+    `base_report_id` : réutilise metadata + semantic_model_info d'un rapport précédent de la
+    même session (comme /reports/generate en CSV) — court-circuite CP1 (cf.
+    pipeline/graph.py::_route_after_intent). Sans ce paramètre, CP1 se redéclenche à CHAQUE
+    message car metadata_agent recalcule les confidences depuis zéro à chaque appel.
+
+    `setup_only` : connexion initiale sans vraie question utilisateur — le pipeline s'arrête
+    après metadata_agent au lieu de lancer data_agent/insight_agent sur le prompt générique
+    de connexion (cf. pipeline/graph.py).
+    """
+    if len(prompt.strip()) < 5:
+        raise HTTPException(status_code=422, detail="Le prompt doit faire au moins 5 caractères.")
+    if len(prompt.strip()) > 500:
+        raise HTTPException(
+            status_code=422, detail="Le prompt ne doit pas dépasser 500 caractères."
+        )
+    if not pbix_file_name.strip():
+        raise HTTPException(
+            status_code=422, detail="pbix_file_name est requis (nom du fichier Power BI Desktop ouvert)."
+        )
+
+    report_id = str(uuid.uuid4())
+    _tenant_id = tenant_id or _DEMO_TENANT
+    _user_id = user_id or "demo-user"
+    _session_id = session_id or str(uuid.uuid4())
+
+    try:
+        brand_kit_dict: dict = json.loads(brand_kit) if brand_kit else {}
+    except json.JSONDecodeError:
+        brand_kit_dict = {}
+
+    state = initial_state(
+        tenant_id=_tenant_id,
+        user_id=_user_id,
+        report_id=report_id,
+        prompt=prompt.strip(),
+        brand_kit=brand_kit_dict,
+        data_source="powerbi_local",
+        pbix_file_name=pbix_file_name.strip(),
+        setup_only=setup_only.strip().lower() in ("true", "1", "yes"),
+    )
+    state["status"] = "running"
+    state["session_id"] = _session_id
+
+    # Réutiliser metadata + semantic_model_info d'un rapport précédent (court-circuite CP1)
+    if base_report_id:
+        base_state = await get_report_state(base_report_id)
+        if base_state:
+            if base_state.get("metadata"):
+                state["metadata"] = base_state["metadata"]
+            if base_state.get("semantic_model_info"):
+                state["semantic_model_info"] = base_state["semantic_model_info"]
+
+    await save_report_state(report_id, dict(state))
+
+    pipeline = _get_pipeline()
+    asyncio.create_task(_run_pipeline(pipeline, state, report_id))
+
+    logger.info(
+        "report_generation_started_powerbi",
+        report_id=report_id,
+        tenant_id=_tenant_id,
+        session_id=_session_id,
+        pbix_file_name=pbix_file_name,
+    )
+    return {
+        "report_id": report_id,
+        "status": "running",
+        "session_id": _session_id,
+        "pbix_file_name": pbix_file_name.strip(),
     }
 
 
@@ -224,6 +322,15 @@ async def get_report_html(report_id: str):
 
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
+
+
+@router.get("/sessions")
+async def list_sessions(tenant_id: str = "") -> dict:
+    """Liste les conversations du tenant, triées par activité récente — alimente la
+    sidebar historique du frontend."""
+    _tenant_id = tenant_id or _DEMO_TENANT
+    sessions = await _list_sessions_store(_tenant_id)
+    return {"sessions": sessions}
 
 
 @router.post("/sessions/{session_id}/messages", status_code=200)

@@ -6,8 +6,22 @@ from app.agents.base_agent import BaseAgent
 from app.config import settings
 from app.pipeline.state import PipelineState
 from app.services.llm import call_llm_json
+from app.services.schema_rag import _question_has_temporal_marker
 
 logger = structlog.get_logger(__name__)
+
+# Colonnes dont le nom évoque une temporalité (mois, date, année...) — utilisé pour forcer
+# chart_type="line" de façon déterministe quand la question ET la colonne x sont temporelles,
+# plutôt que de dépendre uniquement du jugement du LLM par insight (cf. VizAgent.run()).
+_TEMPORAL_COLUMN_KEYWORDS = (
+    "date", "mois", "month", "année", "annee", "year", "trimestre", "quarter",
+    "semaine", "week", "jour", "day", "period", "periode", "yearmonth",
+)
+
+
+def _is_temporal_column(col_name: str) -> bool:
+    lowered = col_name.lower()
+    return any(kw in lowered for kw in _TEMPORAL_COLUMN_KEYWORDS)
 
 # ── Règles de sélection de graphique ─────────────────────────────────────────
 
@@ -149,6 +163,11 @@ class VizAgent(BaseAgent):
         # ── Étape B : génération des viz_specs ───────────────────────────────
         agg_keys = _extract_agg_keys(aggregates)
         viz_specs: list[dict] = []
+        # Détection déterministe (mots-clés, pas LLM) : la question porte-t-elle sur une
+        # évolution temporelle ? Utilisé ci-dessous pour forcer chart_type="line" plutôt que
+        # de dépendre uniquement du choix du LLM par insight — plus fiable et sans coût
+        # supplémentaire (cf. demande : "par défaut, une line chart qui est le plus adapté").
+        prompt_is_temporal = _question_has_temporal_marker(state.get("prompt", ""))
 
         for insight in insights:
             if len(viz_specs) >= _MAX_VIZ_SPECS:
@@ -178,6 +197,17 @@ class VizAgent(BaseAgent):
                 ]
                 continue
 
+            # Override déterministe : question d'évolution + colonne x temporelle → "line",
+            # peu importe ce que le LLM a choisi (voir prompt_is_temporal ci-dessus).
+            if prompt_is_temporal and _is_temporal_column(spec.get("x", "")) and spec["chart_type"] != "line":
+                log.info(
+                    "viz_chart_type_forced_line",
+                    original=spec["chart_type"],
+                    x=spec.get("x"),
+                    insight=insight.get("title"),
+                )
+                spec["chart_type"] = "line"
+
             # ── Étape D : appliquer couleurs ─────────────────────────────────
             spec = _apply_colors(spec, colors)
             viz_specs.append(spec)
@@ -202,7 +232,10 @@ class VizAgent(BaseAgent):
                 is_temporal = any(
                     t in c.lower() for c in cols for t in ("mois", "date", "month", "semaine", "year")
                 )
-                chart_type = "line" if is_temporal and len(rows) > 2 else "bar"
+                # Question d'évolution explicite → line dès qu'une colonne temporelle existe,
+                # même sur peu de points (l'utilisateur a demandé une line chart, pas au moteur
+                # de décider selon le volume de données).
+                chart_type = "line" if is_temporal and (len(rows) > 2 or prompt_is_temporal) else "bar"
                 spec = _apply_colors({
                     "chart_type": chart_type,
                     "title": key.replace("_", " ").strip().capitalize(),

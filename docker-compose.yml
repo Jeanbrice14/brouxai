@@ -63,6 +63,32 @@ services:
       "
     restart: "no"
 
+  # Optionnel — recommandé sur Windows si le backend natif (uvicorn lancé directement sur
+  # l'hôte) échoue à se connecter à Postgres (voir README.md, section RAG schéma sémantique,
+  # "Blocage réseau Windows → Postgres" pour le diagnostic complet). `environment:` surcharge
+  # les URLs localhost de backend/.env avec les noms de service Docker (postgres/redis/minio).
+  backend:
+    build: ./backend
+    container_name: brouxai-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://narr8:narr8dev@postgres:5432/narr8
+      DATABASE_URL_SYNC: postgresql://narr8:narr8dev@postgres:5432/narr8
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_ENDPOINT: http://minio:9000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    profiles:
+      - backend
+
 volumes:
   postgres_data:
   redis_data:

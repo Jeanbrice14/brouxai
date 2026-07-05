@@ -162,6 +162,144 @@ async def test_no_hitl_on_high_confidence():
     assert result["hitl_checkpoint"] is None
 
 
+def _make_powerbi_state(pbix_file_name: str = "ventes.pbix") -> dict:
+    return initial_state(
+        tenant_id="tenant-test",
+        user_id="user-test",
+        report_id="report-test",
+        prompt="Analyse les ventes par région",
+        data_source="powerbi_local",
+        pbix_file_name=pbix_file_name,
+    )
+
+
+_PBI_MODEL_INFO = {
+    "tables": {
+        "Sales": {
+            "columns": {
+                "Amount": {"dataType": "Int64", "description": "Montant de la vente"},
+                "Region": {"dataType": "String", "description": ""},
+            },
+            "description": "Table des ventes",
+        }
+    },
+    "measures": {
+        "Total Sales": {"description": "Somme des ventes", "dataType": "Double"},
+    },
+    "relations": [],
+}
+
+
+@pytest.mark.asyncio
+async def test_powerbi_mode_builds_metadata_without_llm():
+    """Mode powerbi_local : get_model_metadata() alimente state['metadata'], pas de LLM."""
+    state = _make_powerbi_state()
+    agent = MetadataAgent()
+    fake_client = AsyncMock()
+    fake_client.connect_to_desktop_file = AsyncMock(return_value={})
+    fake_client.get_model_metadata = AsyncMock(return_value=_PBI_MODEL_INFO)
+
+    mock_index_schema = AsyncMock(return_value={"reindexed": True, "n_fields": 3, "hash": "abc"})
+
+    with (
+        patch("app.agents.metadata_agent.get_powerbi_client", return_value=fake_client),
+        patch("app.agents.metadata_agent.call_llm_json", AsyncMock(side_effect=AssertionError("LLM ne doit pas être appelé"))),
+        patch("app.agents.metadata_agent.index_schema", mock_index_schema),
+    ):
+        result = await agent(state)
+
+    assert result["status"] != "error", f"Erreurs: {result['errors']}"
+    fake_client.connect_to_desktop_file.assert_awaited_once_with("ventes.pbix")
+    assert result["semantic_model_info"] == _PBI_MODEL_INFO
+    mock_index_schema.assert_awaited_once_with("tenant-test", "ventes.pbix", _PBI_MODEL_INFO)
+
+    files = result["metadata"]["files"]
+    sales_ref = "powerbi://Sales"
+    assert sales_ref in files
+    assert files[sales_ref]["columns"]["Amount"]["confidence"] == 0.95  # description non vide
+    assert files[sales_ref]["columns"]["Region"]["confidence"] == 0.60  # pas de description
+
+    measures_ref = "powerbi://__measures__"
+    assert measures_ref in files
+    assert files[measures_ref]["columns"]["Total Sales"]["kind"] == "measure"
+
+    # HITL déclenché car "Region" est sous le seuil 0.85
+    assert result["hitl_pending"] is True
+    assert result["hitl_checkpoint"] == "cp1_metadata"
+
+    # "type" doit toujours refléter le dataType réel — y compris pour les mesures, jamais
+    # le mot générique "measure" (régression : le CP1 affichait "text" par défaut côté front
+    # faute de correspondance avec un type réel).
+    assert files[sales_ref]["columns"]["Amount"]["type"] == "Int64"
+    assert files[sales_ref]["columns"]["Region"]["type"] == "String"
+    assert files[measures_ref]["columns"]["Total Sales"]["type"] == "Double"
+
+
+@pytest.mark.asyncio
+async def test_powerbi_mode_unit_derived_from_format_string_not_raw_code():
+    """Régression réelle (AdventureWorks) : le formatString Power BI est un code de mise en
+    forme (ex: "\\$#,0.###############;(\\$#,0.###############);\\$#,0.###############"),
+    pas une unité métier — il ne doit jamais apparaître tel quel dans "unit". On extrait au
+    mieux un symbole reconnaissable (devise, %), sinon chaîne vide."""
+    model_info = {
+        "tables": {
+            "Sales": {
+                "columns": {
+                    "Revenue": {
+                        "dataType": "Double",
+                        "description": "CA",
+                        "formatString": '\\$#,0.###############;(\\$#,0.###############);\\$#,0.###############',
+                    },
+                    "Margin": {
+                        "dataType": "Double",
+                        "description": "Marge",
+                        "formatString": "0.00%;-0.00%;0.00%",
+                    },
+                    "Quantity": {
+                        "dataType": "Int64",
+                        "description": "Quantité",
+                        "formatString": "#,0",
+                    },
+                },
+                "description": "Table des ventes",
+            }
+        },
+        "measures": {},
+        "relations": [],
+    }
+    state = _make_powerbi_state()
+    agent = MetadataAgent()
+    fake_client = AsyncMock()
+    fake_client.connect_to_desktop_file = AsyncMock(return_value={})
+    fake_client.get_model_metadata = AsyncMock(return_value=model_info)
+
+    with (
+        patch("app.agents.metadata_agent.get_powerbi_client", return_value=fake_client),
+        patch("app.agents.metadata_agent.index_schema", AsyncMock(return_value={"reindexed": True, "n_fields": 3, "hash": "x"})),
+    ):
+        result = await agent(state)
+
+    cols = result["metadata"]["files"]["powerbi://Sales"]["columns"]
+    assert cols["Revenue"]["unit"] == "$", f"Attendu symbole '$', obtenu {cols['Revenue']['unit']!r}"
+    assert cols["Margin"]["unit"] == "%", f"Attendu symbole '%', obtenu {cols['Margin']['unit']!r}"
+    assert cols["Quantity"]["unit"] == "", f"Pas de symbole reconnaissable, attendu vide, obtenu {cols['Quantity']['unit']!r}"
+    for col in cols.values():
+        assert "#" not in col["unit"] and ";" not in col["unit"], (
+            f"Le code de formatage brut ne doit jamais apparaître dans 'unit' : {col['unit']!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_powerbi_mode_requires_pbix_file_name():
+    state = _make_powerbi_state(pbix_file_name="")
+    agent = MetadataAgent()
+
+    result = await agent(state)
+
+    assert result["status"] == "error"
+    assert any("pbix_file_name" in e for e in result["errors"])
+
+
 @pytest.mark.asyncio
 async def test_handles_excel_file():
     """Fichier .xlsx : l'agent fonctionne identiquement (read_dataframe délègue le format)."""

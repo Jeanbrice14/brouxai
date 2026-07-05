@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 import pytest
 
+from app.agents.insight_agent import InsightAgent
 from app.pipeline.checkpoints import resume_pipeline
 from app.pipeline.graph import build_pipeline
 from app.pipeline.state import initial_state
@@ -72,14 +73,17 @@ _LLM_INSIGHTS_HIGH_CONFIDENCE = {
     ]
 }
 
-_LONG_NARRATIVE = (
-    "L'analyse des ventes régionales révèle des disparités marquées.\n\n"
-    "L'Île-de-France domine avec la plus grande part du chiffre d'affaires total. "
-    "Cette concentration géographique appelle une attention particulière pour "
-    "diversifier les sources de revenus et renforcer la présence dans d'autres régions. "
-    "Les équipes commerciales devraient prioriser le développement en région Nord et Sud."
-    "\n\nEn conclusion, le portefeuille régional présente un fort potentiel de croissance."
-)
+_STORYTELLING_REPORT_RESPONSE = {
+    "title": "Analyse des ventes régionales",
+    "executive_summary": (
+        "L'Île-de-France domine avec la plus grande part du chiffre d'affaires total. "
+        "Cette concentration géographique appelle une attention particulière."
+    ),
+    "recommendations": [
+        "Diversifier les sources de revenus hors Île-de-France.",
+        "Renforcer la présence commerciale en région Nord et Sud.",
+    ],
+}
 
 _MOCK_VIZ_SPEC = {
     "chart_type": "bar",
@@ -111,7 +115,7 @@ _BASE_PATCHES = {
     ),
     "app.agents.data_agent.get_cache": AsyncMock(return_value=_CACHED_AGGREGATES),
     "app.agents.data_agent.set_cache": AsyncMock(),
-    "app.agents.storytelling_agent.call_llm": AsyncMock(return_value=_LONG_NARRATIVE),
+    "app.agents.storytelling_agent.call_llm_json": AsyncMock(return_value=_STORYTELLING_REPORT_RESPONSE),
     "app.agents.viz_agent.call_llm_json": AsyncMock(return_value={"viz_specs": [_MOCK_VIZ_SPEC]}),
     "app.agents.qa_agent.call_llm_json": AsyncMock(return_value=_MOCK_QA_LLM_RESPONSE),
     "app.agents.layout_agent.upload_file": AsyncMock(),
@@ -203,7 +207,7 @@ async def test_resume_pipeline_cp3_completes_report():
         status="running",
         hitl_pending=False,
         hitl_checkpoint=None,
-        metadata={"files": [{"filename": "ventes.csv", "columns": []}]},
+        metadata={"files": {"ventes.csv": {"columns": {}}}},
         schema={"relations": [], "alerts": []},
         aggregates=_CACHED_AGGREGATES,
         insights=_LLM_INSIGHTS_HIGH_CONFIDENCE["insights"],  # insights corrigés
@@ -215,7 +219,10 @@ async def test_resume_pipeline_cp3_completes_report():
     )
 
     with (
-        patch("app.agents.storytelling_agent.call_llm", AsyncMock(return_value=_LONG_NARRATIVE)),
+        patch(
+            "app.agents.storytelling_agent.call_llm_json",
+            AsyncMock(return_value=_STORYTELLING_REPORT_RESPONSE),
+        ),
         patch(
             "app.agents.viz_agent.call_llm_json",
             AsyncMock(return_value={"viz_specs": [_MOCK_VIZ_SPEC]}),
@@ -237,6 +244,84 @@ async def test_resume_pipeline_cp3_completes_report():
 
 
 @pytest.mark.asyncio
+async def test_resume_pipeline_cp2_schema_always_invokes_insight_agent():
+    """resume_pipeline depuis cp2_schema (entrée data_agent), quel que soit l'intent, doit
+    invoquer InsightAgent — le insight/narrative doit apparaître sur tout prompt, y compris
+    simple_query (cf. graph.py::build_pipeline, data_agent → insight_agent inconditionnel).
+
+    Avant ce changement, intent=simple_query court-circuitait insight/storytelling/viz/qa
+    pour aller direct au layout ; la demande utilisateur explicite est que l'insight
+    apparaisse pour tous les prompts, ce test valide donc l'inverse de l'ancien comportement.
+    """
+    state = _make_state(
+        intent="simple_query",
+        response_type="table",
+        status="running",
+        hitl_pending=False,
+        hitl_checkpoint=None,
+        metadata={"files": {"ventes.csv": {"columns": {}}}},
+        schema={"relations": [], "alerts": []},
+        aggregates={},
+        insights=[],
+        narrative="",
+        viz_specs=[],
+        qa_report={},
+        report_urls={},
+        errors=[],
+    )
+
+    original_insight_run = InsightAgent.run
+    insight_calls = {"count": 0}
+
+    async def _spy_insight_run(self, s):
+        insight_calls["count"] += 1
+        return await original_insight_run(self, s)
+
+    with (
+        patch("app.agents.data_agent.read_dataframe", AsyncMock(return_value=_MOCK_DF)),
+        patch(
+            "app.agents.data_agent.call_llm_json",
+            AsyncMock(
+                return_value={
+                    "queries": [
+                        {
+                            "key": "by_region",
+                            "sql": "SELECT region, SUM(ca_ht) AS ca_ht FROM ventes GROUP BY region",
+                        }
+                    ]
+                }
+            ),
+        ),
+        patch("app.agents.data_agent.get_cache", AsyncMock(return_value=None)),
+        patch("app.agents.data_agent.set_cache", AsyncMock()),
+        patch("app.agents.insight_agent.call_llm_json", AsyncMock(return_value=_LLM_INSIGHTS_HIGH_CONFIDENCE)),
+        patch(
+            # response_type="table" pour ce test → StorytellingAgent prend la branche
+            # {title, summary} (pas {title, executive_summary} du mode "report").
+            "app.agents.storytelling_agent.call_llm_json",
+            AsyncMock(return_value={"title": "CA par région", "summary": "L'IDF domine le CA régional."}),
+        ),
+        patch("app.agents.viz_agent.call_llm_json", AsyncMock(return_value={"viz_specs": [_MOCK_VIZ_SPEC]})),
+        patch("app.agents.qa_agent.call_llm_json", AsyncMock(return_value=_MOCK_QA_LLM_RESPONSE)),
+        patch("app.agents.layout_agent.upload_file", AsyncMock()),
+        patch("app.agents.base_agent.save_report_state", AsyncMock()),
+        patch("app.agents.base_agent.notify_hitl_required", AsyncMock()),
+        patch.object(InsightAgent, "run", _spy_insight_run),
+    ):
+        pipeline = resume_pipeline("test-hitl-001", {**state, "hitl_checkpoint": "cp2_schema"})
+        result = await pipeline.ainvoke(state)
+
+    assert insight_calls["count"] == 1, (
+        f"InsightAgent aurait dû être invoqué exactement une fois, appelé {insight_calls['count']} fois"
+    )
+    assert result["status"] == "complete", f"Errors: {result.get('errors')}"
+    assert result["narrative"], "narrative vide — le insight/narrative doit apparaître même pour simple_query"
+    assert result["response_type"] == "table"
+    assert result["response"], "state['response'] non écrit par LayoutAgent (mode table)"
+    assert result["report_urls"] == {}, "Pas d'upload HTML attendu en mode table"
+
+
+@pytest.mark.asyncio
 async def test_resume_pipeline_invalid_checkpoint_raises():
     """resume_pipeline avec checkpoint inconnu → ValueError."""
     state = _make_state(hitl_checkpoint="cp99_unknown")
@@ -253,3 +338,89 @@ async def test_resume_pipeline_missing_checkpoint_raises():
 
     with pytest.raises(ValueError, match="hitl_checkpoint manquant"):
         resume_pipeline("test-hitl-001", state)
+
+
+# ── setup_only : la reprise HITL pendant la connexion initiale doit s'arrêter avant
+# data_agent/insight_agent, pas enchaîner l'analyse complète sur le prompt générique de
+# connexion (régression réelle — CP1/CP2 approuvés déclenchaient un CP3 avant la première
+# vraie question de l'utilisateur) ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_resume_pipeline_cp1_csv_setup_only_stops_at_setup_complete():
+    """Reprise cp1_metadata (mode csv, setup_only=True) : schema_linking_agent tourne
+    (relations nécessaires), mais le pipeline s'arrête ensuite — data_agent n'est jamais
+    invoqué, state['response'] == {"type": "setup_complete"}."""
+    state = _make_state(
+        setup_only=True,
+        status="running",
+        hitl_pending=False,
+        hitl_checkpoint=None,
+        metadata={"files": {"ventes.csv": {"columns": {}}}},
+    )
+
+    with (
+        patch("app.agents.schema_linking_agent.read_dataframe", _BASE_PATCHES["app.agents.schema_linking_agent.read_dataframe"]),
+        patch("app.agents.schema_linking_agent.call_llm_json", _BASE_PATCHES["app.agents.schema_linking_agent.call_llm_json"]),
+        patch("app.agents.base_agent.save_report_state", AsyncMock()),
+        patch("app.agents.base_agent.notify_hitl_required", AsyncMock()),
+    ):
+        pipeline = resume_pipeline("test-hitl-001", {**state, "hitl_checkpoint": "cp1_metadata"})
+        result = await pipeline.ainvoke(state)
+
+    assert result["response"] == {"type": "setup_complete"}
+    assert result["status"] == "complete"
+    assert result["aggregates"] == {}, "data_agent n'a jamais dû tourner — aggregates doit rester vide"
+
+
+@pytest.mark.asyncio
+async def test_resume_pipeline_cp2_csv_setup_only_stops_immediately():
+    """Reprise cp2_schema (mode csv, setup_only=True) : entry_node doit être redirigé
+    directement vers setup_complete_node, sans jamais toucher data_agent."""
+    state = _make_state(
+        setup_only=True,
+        status="running",
+        hitl_pending=False,
+        hitl_checkpoint=None,
+        metadata={"files": {"ventes.csv": {"columns": {}}}},
+        schema={"relations": [], "alerts": []},
+    )
+
+    with (
+        patch("app.agents.base_agent.save_report_state", AsyncMock()),
+        patch("app.agents.base_agent.notify_hitl_required", AsyncMock()),
+    ):
+        pipeline = resume_pipeline("test-hitl-001", {**state, "hitl_checkpoint": "cp2_schema"})
+        result = await pipeline.ainvoke(state)
+
+    assert result["response"] == {"type": "setup_complete"}
+    assert result["status"] == "complete"
+    assert result["aggregates"] == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_pipeline_cp1_powerbi_setup_only_stops_immediately():
+    """Reprise cp1_metadata (mode powerbi_local, setup_only=True) : entry_node doit être
+    redirigé directement vers setup_complete_node, sans jamais toucher data_agent (qui
+    referait une connexion MCP / génération DAX inutile sur le prompt de connexion)."""
+    state = _make_state(
+        data_source="powerbi_local",
+        pbix_file_name="AdventureWorks",
+        setup_only=True,
+        status="running",
+        hitl_pending=False,
+        hitl_checkpoint=None,
+        metadata={"files": {"powerbi://Sales": {"columns": {}}}},
+        semantic_model_info={"tables": {}, "measures": {}, "relations": []},
+    )
+
+    with (
+        patch("app.agents.base_agent.save_report_state", AsyncMock()),
+        patch("app.agents.base_agent.notify_hitl_required", AsyncMock()),
+    ):
+        pipeline = resume_pipeline("test-hitl-001", {**state, "hitl_checkpoint": "cp1_metadata"})
+        result = await pipeline.ainvoke(state)
+
+    assert result["response"] == {"type": "setup_complete"}
+    assert result["status"] == "complete"
+    assert result["aggregates"] == {}

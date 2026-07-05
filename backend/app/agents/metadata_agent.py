@@ -9,9 +9,15 @@ from app.agents.base_agent import BaseAgent
 from app.config import settings
 from app.pipeline.state import PipelineState
 from app.services.llm import call_llm_json
+from app.services.powerbi_local_mcp import get_powerbi_client
+from app.services.schema_rag import index_schema
 from app.services.storage import read_dataframe
 
 logger = structlog.get_logger(__name__)
+
+# Confiance appliquée aux colonnes/mesures Power BI (mode powerbi_local)
+_PBI_CONFIDENCE_WITH_DESCRIPTION = 0.95
+_PBI_CONFIDENCE_WITHOUT_DESCRIPTION = 0.60
 
 # Nombre de valeurs d'échantillon envoyées au LLM
 _SAMPLE_SIZE = 5
@@ -111,26 +117,153 @@ def _build_grain_prompt(col_summaries: list[str]) -> str:
     )
 
 
-class MetadataAgent(BaseAgent):
-    """Agent 1 — Analyse les fichiers uploadés et construit le Data Dictionary.
+_UNIT_SYMBOLS = ["€", "$", "£", "¥", "%"]
 
-    Étapes :
+
+def _extract_unit_from_format_string(format_string: str) -> str:
+    """Dérive une unité d'affichage courte depuis un formatString Power BI.
+
+    formatString est un code de formatage Excel/PBI (ex: currency avec parenthèses pour les
+    négatifs : "\\$#,0.###############;(\\$#,0.###############);\\$#,0.###############") —
+    pas une unité au sens métier. Afficher ce code brut dans la colonne "Unité" du CP1 induit
+    en erreur. On se limite à détecter un symbole simple et reconnaissable (devise, %) ;
+    sinon on retourne une chaîne vide plutôt que le code de formatage brut.
+    """
+    if not format_string:
+        return ""
+    for symbol in _UNIT_SYMBOLS:
+        if symbol in format_string:
+            return symbol
+    return ""
+
+
+def _pbi_column_meta(col_name: str, col_info: dict, kind: str) -> dict:
+    """Transforme une colonne/mesure Power BI en entrée du format `metadata.files.*.columns`.
+
+    Confiance : haute si une description est renseignée dans le modèle, réduite sinon
+    (pas d'inférence LLM ici — les métadonnées viennent déjà du modèle sémantique).
+    """
+    description = str(col_info.get("description") or "").strip()
+    confidence = (
+        _PBI_CONFIDENCE_WITH_DESCRIPTION if description else _PBI_CONFIDENCE_WITHOUT_DESCRIPTION
+    )
+    # Type réel (Int64, String, DateTime, Double...) pour colonnes ET mesures — "kind"
+    # (déjà présent séparément) distingue mesure/colonne, "type" ne doit jamais perdre le
+    # type de donnée réel derrière le mot générique "measure".
+    data_type = col_info.get("dataType", col_info.get("type", "unknown"))
+    return {
+        "dtype": data_type,
+        "n_unique": None,
+        "null_pct": None,
+        "sample": [],
+        "min": None,
+        "max": None,
+        "mean": None,
+        "semantic_name": col_info.get("displayName", col_name),
+        "description": description,
+        "type": data_type,
+        "unit": _extract_unit_from_format_string(col_info.get("formatString", "") or ""),
+        "confidence": confidence,
+        "is_key_candidate": bool(col_info.get("isKey", False)),
+        "kind": kind,  # "column" | "measure"
+    }
+
+
+def _transform_pbi_metadata(model_info: dict) -> tuple[dict, bool]:
+    """Transforme le résultat de get_model_metadata() en state['metadata']['files'].
+
+    Une "table" virtuelle par table Power BI (ref = "powerbi://<table>"), colonnes
+    ET mesures fusionnées dans le même dict `columns` (les mesures portent kind="measure").
+    Les mesures sans table d'appartenance connue sont regroupées dans une table
+    virtuelle "__measures__".
+
+    Returns:
+        (files_meta, trigger_hitl)
+    """
+    files_meta: dict = {}
+    trigger_hitl = False
+
+    tables: dict = model_info.get("tables", {}) or {}
+    measures: dict = model_info.get("measures", {}) or {}
+
+    for table_name, table_info in tables.items():
+        ref = f"powerbi://{table_name}"
+        columns_meta: dict = {}
+        for col_name, col_info in (table_info.get("columns", {}) or {}).items():
+            entry = _pbi_column_meta(col_name, col_info if isinstance(col_info, dict) else {}, "column")
+            columns_meta[col_name] = entry
+            if entry["confidence"] < settings.hitl_metadata_confidence_threshold:
+                trigger_hitl = True
+
+        confidences = [c["confidence"] for c in columns_meta.values()]
+        avg_confidence = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
+
+        files_meta[ref] = {
+            "row_count": None,  # inconnu sans exécuter de DAX — pas de lecture brute ici
+            "col_count": len(columns_meta),
+            "columns": columns_meta,
+            "grain": table_info.get("description", "") if isinstance(table_info, dict) else "",
+            "avg_confidence": avg_confidence,
+        }
+
+    if measures:
+        measures_ref = "powerbi://__measures__"
+        columns_meta = {}
+        for measure_name, measure_info in measures.items():
+            entry = _pbi_column_meta(
+                measure_name, measure_info if isinstance(measure_info, dict) else {}, "measure"
+            )
+            columns_meta[measure_name] = entry
+            if entry["confidence"] < settings.hitl_metadata_confidence_threshold:
+                trigger_hitl = True
+
+        confidences = [c["confidence"] for c in columns_meta.values()]
+        avg_confidence = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
+        files_meta[measures_ref] = {
+            "row_count": None,
+            "col_count": len(columns_meta),
+            "columns": columns_meta,
+            "grain": "Mesures DAX du modèle sémantique",
+            "avg_confidence": avg_confidence,
+        }
+
+    return files_meta, trigger_hitl
+
+
+class MetadataAgent(BaseAgent):
+    """Agent 1 — Construit le Data Dictionary, depuis un upload CSV/Excel ou un modèle Power BI local.
+
+    Mode "csv" (défaut) :
         A. Profil statistique de chaque colonne (sans données brutes).
         B. Inférence sémantique via LLM (semantic_name, type, unit, confidence…).
         C. Calcul avg_confidence par fichier.
         D. Inférence du grain du fichier via LLM.
         E. Déclenchement HITL si confidence < seuil.
 
-    Input  : state["raw_data_refs"]
-    Output : state["metadata"]
-    Modèle : settings.litellm_cheap_model (gpt-4o-mini)
-    HITL CP1 : confidence colonne < settings.hitl_metadata_confidence_threshold (0.85)
+    Mode "powerbi_local" :
+        A. Connexion à l'instance Analysis Services locale via powerbi_local_mcp
+           (state["pbix_file_name"], recherche auto par le serveur MCP).
+        B. get_model_metadata() → tables/colonnes/mesures/relations, mis en cache
+           dans state["semantic_model_info"].
+        C. Transformation vers le format state["metadata"]["files"] attendu par
+           SchemaLinkingAgent/DataAgent — confiance déduite de la présence d'une
+           description (pas d'inférence LLM : les métadonnées viennent déjà du modèle).
+        D. Déclenchement HITL si confidence < seuil (colonnes/mesures sans description).
+
+    Input  : state["raw_data_refs"] (csv) | state["pbix_file_name"] (powerbi_local)
+    Output : state["metadata"] (+ state["semantic_model_info"] en mode powerbi_local)
+    Modèle : settings.litellm_cheap_model (gpt-4o-mini) — mode csv uniquement
+    HITL CP1 : confidence colonne/mesure < settings.hitl_metadata_confidence_threshold (0.85)
     """
 
     name = "metadata_agent"
 
     async def run(self, state: PipelineState) -> PipelineState:
         log = logger.bind(report_id=state.get("report_id"))
+
+        if state.get("data_source") == "powerbi_local":
+            return await self._run_powerbi(state, log)
+
         files_meta: dict = {}
         trigger_hitl = False
 
@@ -158,6 +291,54 @@ class MetadataAgent(BaseAgent):
             state["hitl_checkpoint"] = "cp1_metadata"
             log.info("metadata_hitl_triggered")
 
+        return state
+
+    async def _run_powerbi(self, state: PipelineState, log) -> PipelineState:
+        """Branche Power BI local : connexion MCP + get_model_metadata() (pas de LLM)."""
+        file_name = state.get("pbix_file_name", "")
+        if not file_name:
+            raise ValueError(
+                "pbix_file_name manquant — requis en mode data_source='powerbi_local'."
+            )
+
+        # PowerBIConnectionError (message déjà actionnable, cf. powerbi_local_mcp) remonte
+        # telle quelle jusqu'à BaseAgent.__call__, qui l'enregistre dans state["errors"].
+        client = get_powerbi_client()
+        await client.connect_to_desktop_file(file_name)
+        model_info = await client.get_model_metadata()
+
+        state["semantic_model_info"] = model_info
+
+        # Indexation RAG du schéma (une fois par tenant+modèle, pas par requête — skip
+        # automatique si le hash structurel est inchangé). N'échoue jamais bruyamment :
+        # index_schema() catch ses propres erreurs, DataAgent retombe sur le schéma complet
+        # si le RAG est indisponible.
+        rag_result = await index_schema(state["tenant_id"], file_name, model_info)
+        log.info("metadata_schema_rag", **rag_result)
+
+        files_meta, trigger_hitl = _transform_pbi_metadata(model_info)
+        state["metadata"] = {"files": files_meta, "source": "powerbi_local"}
+
+        # raw_data_refs reste vide : c'est la valeur sémantiquement correcte en mode
+        # powerbi_local, pas un contournement. Ce champ documente des pointeurs Blob
+        # Storage (cf. state.py) — il n'en existe aucun ici, la source de données étant
+        # une connexion live au modèle Power BI. SchemaLinkingAgent n'est de toute façon
+        # plus invoqué dans ce mode (graph.py::_route_after_metadata route directement
+        # vers DataAgent), donc le risque historique de crash sur read_dataframe() avec
+        # des refs "powerbi://..." ne s'applique plus — ce n'est donc plus la raison de
+        # laisser cette liste vide. Les relations du modèle (déjà connues, pas inférées)
+        # sont dans semantic_model_info et consommées directement par DataAgent.
+
+        if trigger_hitl:
+            state["hitl_pending"] = True
+            state["hitl_checkpoint"] = "cp1_metadata"
+            log.info("metadata_hitl_triggered", reason="powerbi_missing_descriptions")
+
+        log.info(
+            "metadata_powerbi_processed",
+            file_name=file_name,
+            n_tables=len(files_meta),
+        )
         return state
 
     async def _process_file(self, df: pd.DataFrame, ref: str, log) -> dict:

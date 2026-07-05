@@ -30,9 +30,14 @@ def format_table_response(state: PipelineState) -> dict:
         sentences = [s.strip() for s in narrative.replace("\n", " ").split(".") if s.strip()]
         summary = sentences[0] + "." if sentences else narrative[:120]
 
+    # narrative_title (StorytellingAgent) : titre reformulé, jamais la question brute —
+    # prompt[:80] n'est qu'un filet de sécurité si l'agent n'a pas tourné (ne devrait plus
+    # arriver, insight+storytelling passent maintenant par tous les intents, cf. graph.py).
+    title = state.get("narrative_title") or (prompt[:80] if prompt else "Résultats")
+
     return {
         "type": "table",
-        "title": prompt[:80] if prompt else "Résultats",
+        "title": title,
         "columns": columns,
         "rows": rows,
         "summary": summary,
@@ -69,7 +74,7 @@ def format_chart_response(state: PipelineState) -> dict:
             chart_type = "line" if is_temporal and len(rows) > 2 else "bar"
             viz_spec = {
                 "chart_type": chart_type,
-                "title": prompt[:80] or key.replace("_", " ").capitalize(),
+                "title": state.get("narrative_title") or key.replace("_", " ").capitalize(),
                 "data_key": key,
                 "x": str_cols[0] if str_cols else cols[0],
                 "y": numeric_cols[0],
@@ -86,9 +91,13 @@ def format_chart_response(state: PipelineState) -> dict:
         sentences = [s.strip() for s in narrative.replace("\n", " ").split(".") if s.strip()]
         caption = ". ".join(sentences[:3]) + ("." if sentences[:3] else "")
 
+    # Priorité : titre spécifique du graphique (VizAgent) > titre reformulé (StorytellingAgent)
+    # > prompt tronqué (filet de sécurité seulement).
+    title = viz_spec.get("title") or state.get("narrative_title") or (prompt[:80] or "Graphique")
+
     return {
         "type": "chart",
-        "title": viz_spec.get("title", prompt[:80] or "Graphique"),
+        "title": title,
         "viz_spec": viz_spec,
         "data": data,
         "caption": caption,
@@ -110,9 +119,11 @@ def format_report_response(state: PipelineState) -> dict:
         spec_copy["data"] = rows if isinstance(rows, list) else []
         viz_specs_with_data.append(spec_copy)
 
+    title = state.get("narrative_title") or state.get("prompt", "Rapport analytique")[:80]
+
     return {
         "type": "report",
-        "title": state.get("prompt", "Rapport analytique")[:80],
+        "title": title,
         "narrative": state.get("narrative", ""),
         "insights": state.get("insights", []),
         "recommendations": state.get("recommendations", []),

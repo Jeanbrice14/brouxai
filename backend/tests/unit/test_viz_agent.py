@@ -231,3 +231,61 @@ async def test_maximum_5_viz_specs():
     assert mock_llm.call_count <= 5, (
         f"call_llm_json ne devrait pas être appelé plus de 5 fois, appelé {mock_llm.call_count} fois"
     )
+
+
+# ── Override déterministe : question d'évolution → chart_type="line" ────────────
+
+
+@pytest.mark.asyncio
+async def test_forces_line_chart_for_temporal_question_even_if_llm_picks_bar():
+    """Régression réelle (AdventureWorks) : pour "montre-moi sur une line chart l'évolution
+    du chiffre d'affaires", le LLM par-insight peut choisir "bar" — VizAgent doit forcer
+    "line" dès que la question contient un marqueur temporel ET que la colonne x choisie est
+    elle-même temporelle (ex: "month"), sans dépendre uniquement du jugement du LLM."""
+    state = _make_state(insights=[SAMPLE_INSIGHTS[1]])  # "Croissance mensuelle" -> by_month
+    state["prompt"] = "Montre-moi sur une line chart l'évolution du chiffre d'affaires"
+    agent = VizAgent()
+
+    spec = _spec_for("Croissance mensuelle", "by_month")
+    spec["chart_type"] = "bar"  # le LLM se trompe volontairement pour ce test
+
+    with patch("app.agents.viz_agent.call_llm_json", AsyncMock(return_value=spec)):
+        result = await agent(state)
+
+    assert result["viz_specs"], "Une viz_spec aurait dû être générée"
+    assert result["viz_specs"][0]["chart_type"] == "line", (
+        f"chart_type aurait dû être forcé à 'line' (question temporelle + colonne x temporelle), "
+        f"obtenu: {result['viz_specs'][0]['chart_type']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_does_not_force_line_chart_for_non_temporal_question():
+    """Sans marqueur temporel dans la question, le choix du LLM (ici "bar") est respecté —
+    l'override ne doit pas s'appliquer indiscriminément à toute colonne nommée "month"."""
+    state = _make_state(insights=[SAMPLE_INSIGHTS[1]])
+    state["prompt"] = "Compare les performances par catégorie de produit"  # aucun marqueur temporel
+    agent = VizAgent()
+
+    spec = _spec_for("Croissance mensuelle", "by_month")
+    spec["chart_type"] = "bar"
+
+    with patch("app.agents.viz_agent.call_llm_json", AsyncMock(return_value=spec)):
+        result = await agent(state)
+
+    assert result["viz_specs"][0]["chart_type"] == "bar"
+
+
+@pytest.mark.asyncio
+async def test_fallback_forces_line_for_temporal_question_even_with_few_points():
+    """Chemin fallback (aucun insight) : une question d'évolution force "line" même avec
+    seulement 2 points (pas besoin d'attendre >2 lignes comme pour le cas générique)."""
+    state = _make_state(insights=[], aggregates={"by_month": SAMPLE_AGGREGATES["by_month"]})
+    state["prompt"] = "Évolution du chiffre d'affaires par mois"
+    agent = VizAgent()
+
+    with patch("app.agents.viz_agent.call_llm_json", AsyncMock()):
+        result = await agent(state)
+
+    assert result["viz_specs"], "Une viz_spec de fallback aurait dû être générée"
+    assert result["viz_specs"][0]["chart_type"] == "line"

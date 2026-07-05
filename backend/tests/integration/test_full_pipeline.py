@@ -55,13 +55,17 @@ _LLM_INSIGHTS_RESPONSE = {
     ]
 }
 
-_LONG_NARRATIVE = (
-    "L'analyse des ventes régionales révèle des disparités marquées.\n\n"
-    "L'Île-de-France domine avec la plus grande part du chiffre d'affaires total. "
-    "Cette concentration géographique mérite une attention particulière.\n\n"
-    "Des actions correctives sont recommandées pour rééquilibrer la performance "
-    "régionale et optimiser les ressources commerciales sur l'ensemble du territoire."
-) * 3
+_STORYTELLING_REPORT_RESPONSE = {
+    "title": "Analyse des ventes Q1 2024",
+    "executive_summary": (
+        "L'Île-de-France domine avec la plus grande part du chiffre d'affaires total. "
+        "Cette concentration géographique mérite une attention particulière."
+    ),
+    "recommendations": [
+        "Rééquilibrer la performance régionale sur l'ensemble du territoire.",
+        "Optimiser les ressources commerciales hors Île-de-France.",
+    ],
+}
 
 _VIZ_SPEC = {
     "chart_type": "bar",
@@ -126,8 +130,11 @@ def mock_all_external():
         patch(
             "app.agents.insight_agent.call_llm_json", AsyncMock(return_value=_LLM_INSIGHTS_RESPONSE)
         ),
-        # StorytellingAgent
-        patch("app.agents.storytelling_agent.call_llm", AsyncMock(return_value=_LONG_NARRATIVE)),
+        # StorytellingAgent (mode "report" — call_llm_json)
+        patch(
+            "app.agents.storytelling_agent.call_llm_json",
+            AsyncMock(return_value=_STORYTELLING_REPORT_RESPONSE),
+        ),
         # VizAgent
         patch("app.agents.viz_agent.call_llm_json", AsyncMock(return_value=_VIZ_SPEC)),
         # QAAgent

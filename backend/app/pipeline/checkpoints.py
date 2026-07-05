@@ -10,6 +10,12 @@ from app.agents.qa_agent import QAAgent
 from app.agents.schema_linking_agent import SchemaLinkingAgent
 from app.agents.storytelling_agent import StorytellingAgent
 from app.agents.viz_agent import VizAgent
+from app.pipeline.graph import (
+    NODE_SETUP_COMPLETE,
+    SETUP_COMPLETE,
+    _route_after_schema,
+    _setup_complete_node,
+)
 from app.pipeline.router import CONTINUE, HITL_WAIT, should_trigger_hitl
 from app.pipeline.state import PipelineState
 
@@ -58,17 +64,23 @@ def _build_resume_pipeline(entry_node: str):
     graph.add_node("qa_agent", qa_agent)
     graph.add_node("layout_agent", layout_agent)
     graph.add_node("hitl_wait", _hitl_wait_node)
+    graph.add_node(NODE_SETUP_COMPLETE, _setup_complete_node)
 
     graph.set_entry_point(entry_node)
 
-    # schema → data (HITL possible après schema)
+    # schema → data, ou arrêt si setup_only (cf. graph.py::_route_after_schema, réutilisée
+    # ici pour rester cohérente avec le graphe principal — CP1 (mode csv) peut être approuvé
+    # pendant le setup initial, avant que l'utilisateur ait posé une vraie question).
     graph.add_conditional_edges(
         "schema_linking_agent",
-        should_trigger_hitl,
-        {HITL_WAIT: "hitl_wait", CONTINUE: "data_agent", END: END},
+        _route_after_schema,
+        {HITL_WAIT: "hitl_wait", CONTINUE: "data_agent", END: END, SETUP_COMPLETE: NODE_SETUP_COMPLETE},
     )
+    graph.add_edge(NODE_SETUP_COMPLETE, END)
 
-    # data → insight (pas de HITL sur data)
+    # data → insight, pour tout intent — cohérent avec le graphe principal (graph.py),
+    # qui envoie désormais systématiquement data_agent vers insight_agent quel que soit
+    # l'intent (le insight/narrative doit apparaître sur tout prompt, y compris simple_query).
     graph.add_edge("data_agent", "insight_agent")
 
     # insight → storytelling (HITL possible)
@@ -124,6 +136,21 @@ def resume_pipeline(report_id: str, state: dict):
             f"report {report_id}: checkpoint inconnu '{checkpoint}'. "
             f"Valeurs valides : {list(_CHECKPOINT_RESUME_MAP)}"
         )
+
+    # cp1_metadata reprend normalement vers schema_linking_agent (mode csv), mais ce
+    # dernier est sauté entièrement en mode powerbi_local (cf. graph.py::_route_after_metadata)
+    # — la reprise doit donc aller directement à data_agent, SAUF si setup_only (connexion
+    # initiale sans vraie question) : dans ce cas le setup s'arrête ici, comme dans le graphe
+    # principal (_route_after_metadata renvoie SETUP_COMPLETE pour powerbi_local+setup_only).
+    if checkpoint == "cp1_metadata" and state.get("data_source") == "powerbi_local":
+        entry_node = NODE_SETUP_COMPLETE if state.get("setup_only") else "data_agent"
+
+    # cp2_schema (mode csv uniquement) reprend normalement vers data_agent, mais si la
+    # session est encore en setup_only (CP2 déclenché pendant la connexion initiale, avant
+    # toute vraie question), le setup doit s'arrêter ici plutôt que de lancer data_agent sur
+    # le prompt générique de connexion — cohérent avec _route_after_schema dans le graphe principal.
+    if checkpoint == "cp2_schema" and state.get("setup_only"):
+        entry_node = NODE_SETUP_COMPLETE
 
     logger.info(
         "resume_pipeline_built",

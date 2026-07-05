@@ -11,6 +11,7 @@ import pytest
 
 from app.agents.storytelling_agent import StorytellingAgent
 from app.pipeline.state import initial_state
+from app.services.llm import call_llm_json
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -145,14 +146,17 @@ async def test_recommendations_capped_at_two():
 
 @pytest.mark.asyncio
 async def test_table_mode_single_sentence():
-    """Mode table → une seule phrase via call_llm."""
+    """Mode table → titre reformulé + une seule phrase via call_llm_json."""
     state = _make_state()
     state["response_type"] = "table"
     agent = StorytellingAgent()
 
     with patch(
-        "app.agents.storytelling_agent.call_llm",
-        AsyncMock(return_value="Les ventes ont progressé de 23% en région Nord."),
+        "app.agents.storytelling_agent.call_llm_json",
+        AsyncMock(return_value={
+            "title": "Ventes par région Nord",
+            "summary": "Les ventes ont progressé de 23% en région Nord.",
+        }),
     ):
         result = await agent(state)
 
@@ -161,18 +165,22 @@ async def test_table_mode_single_sentence():
     assert narrative, "narrative ne doit pas être vide"
     sentences = [s for s in narrative.split(".") if s.strip()]
     assert len(sentences) <= 1, f"Mode table : 1 seule phrase attendue, obtenu : {narrative!r}"
+    assert result["narrative_title"] == "Ventes par région Nord"
 
 
 @pytest.mark.asyncio
 async def test_chart_mode_short_narrative():
-    """Mode chart → 2-3 phrases via call_llm."""
+    """Mode chart → titre reformulé + 2-3 phrases via call_llm_json."""
     state = _make_state()
     state["response_type"] = "chart"
     agent = StorytellingAgent()
 
     with patch(
-        "app.agents.storytelling_agent.call_llm",
-        AsyncMock(return_value="IDF domine le CA. Le Nord est en croissance. L'Ouest est en retrait."),
+        "app.agents.storytelling_agent.call_llm_json",
+        AsyncMock(return_value={
+            "title": "Évolution du CA par région",
+            "narrative": "IDF domine le CA. Le Nord est en croissance. L'Ouest est en retrait.",
+        }),
     ):
         result = await agent(state)
 
@@ -181,3 +189,48 @@ async def test_chart_mode_short_narrative():
     assert narrative, "narrative ne doit pas être vide"
     sentences = [s.strip() for s in narrative.split(".") if s.strip()]
     assert len(sentences) <= 3, f"Mode chart : max 3 phrases attendues. Obtenu : {narrative!r}"
+    assert result["narrative_title"] == "Évolution du CA par région"
+
+
+# ── Régression signature : call_llm_json n'accepte pas `temperature` ──────────
+# (contrairement à call_llm) — un AsyncMock nu ne l'aurait jamais détecté, d'où
+# spec=call_llm_json ici pour faire échouer l'appel si un kwarg invalide est passé.
+
+
+@pytest.mark.asyncio
+async def test_table_mode_call_matches_real_call_llm_json_signature():
+    """Régression réelle : storytelling_agent appelait call_llm_json(..., temperature=0.2),
+    or cette fonction n'accepte pas ce kwarg (contrairement à call_llm) — TypeError silencieux
+    côté agent (catché par BaseAgent, narrative/narrative_title restaient vides sans jamais
+    faire échouer le test, un AsyncMock nu acceptant n'importe quel kwarg)."""
+    state = _make_state()
+    state["response_type"] = "table"
+    agent = StorytellingAgent()
+
+    spec_mock = AsyncMock(spec=call_llm_json)
+    spec_mock.return_value = {"title": "Titre test", "summary": "Résumé test."}
+
+    with patch("app.agents.storytelling_agent.call_llm_json", spec_mock):
+        result = await agent(state)
+
+    assert result["status"] != "error", f"Erreurs: {result['errors']}"
+    assert result["narrative"] == "Résumé test."
+    assert result["narrative_title"] == "Titre test"
+
+
+@pytest.mark.asyncio
+async def test_chart_mode_call_matches_real_call_llm_json_signature():
+    """Même régression que ci-dessus, pour le mode chart."""
+    state = _make_state()
+    state["response_type"] = "chart"
+    agent = StorytellingAgent()
+
+    spec_mock = AsyncMock(spec=call_llm_json)
+    spec_mock.return_value = {"title": "Titre test", "narrative": "Narration test."}
+
+    with patch("app.agents.storytelling_agent.call_llm_json", spec_mock):
+        result = await agent(state)
+
+    assert result["status"] != "error", f"Erreurs: {result['errors']}"
+    assert result["narrative"] == "Narration test."
+    assert result["narrative_title"] == "Titre test"

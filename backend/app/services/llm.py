@@ -104,3 +104,30 @@ async def call_llm_json(
         f"Modèle: {model or settings.litellm_cheap_model}. "
         f"Réponse (200 premiers chars): {content[:200]}"
     )
+
+
+async def call_embedding(texts: list[str], model: str | None = None) -> list[list[float]]:
+    """Génère des embeddings pour une liste de textes en un seul appel batché.
+
+    Utilisé par app.services.schema_rag pour l'indexation/retrieval RAG du schéma
+    Power BI. Modèle par défaut : settings.schema_rag_embedding_model
+    (text-embedding-3-small, OpenAI via LiteLLM — même clé que le reste du projet).
+
+    Args:
+        texts: Liste de textes à embedder (ordre préservé dans le résultat).
+        model: Identifiant du modèle d'embedding LiteLLM.
+
+    Returns:
+        Liste de vecteurs, dans le même ordre que `texts`.
+    """
+    _model = model or settings.schema_rag_embedding_model
+
+    response = await litellm.aembedding(model=_model, input=texts)
+    # En pratique, response.data contient tantôt des objets Embedding (attribut .embedding),
+    # tantôt des dicts bruts selon le provider — on gère les deux formes.
+    vectors = [
+        item["embedding"] if isinstance(item, dict) else item.embedding for item in response.data
+    ]
+
+    logger.info("embedding_call", model=_model, n_texts=len(texts))
+    return vectors

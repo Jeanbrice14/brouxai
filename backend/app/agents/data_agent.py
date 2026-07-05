@@ -13,6 +13,8 @@ from app.config import settings
 from app.pipeline.state import PipelineState
 from app.services.cache import get_cache, make_cache_key, set_cache
 from app.services.llm import call_llm_json
+from app.services.powerbi_local_mcp import PowerBIDaxExecutionError, get_powerbi_client
+from app.services.schema_rag import retrieve_relevant_fields
 from app.services.storage import read_dataframe
 
 logger = structlog.get_logger(__name__)
@@ -26,6 +28,14 @@ _SQL_SYSTEM_PROMPT = (
     "Les tables sont enregistrées par leur nom de fichier (sans extension). "
     "Retourne UNIQUEMENT du JSON valide avec une clé 'queries' : "
     "liste d'objets {\"key\": \"nom_agrégat\", \"sql\": \"SELECT ...\"}."
+)
+
+_DAX_SYSTEM_PROMPT = (
+    "Tu es un expert DAX (Power BI / Analysis Services). "
+    "Génère des requêtes DAX courtes et correctes (EVALUATE ...). "
+    "Utilise UNIQUEMENT les tables, colonnes et mesures listées — n'en invente jamais. "
+    "Retourne UNIQUEMENT du JSON valide avec une clé 'queries' : "
+    "liste d'objets {\"key\": \"nom_agrégat\", \"dax\": \"EVALUATE ...\"}."
 )
 
 
@@ -124,6 +134,142 @@ def _build_sql_prompt(user_prompt: str, schema_summary: str, dfs: dict) -> str:
         '  - Ex correct : {"key": "revenue_by_subcat", "sql": "SELECT s.SubcategoryName, SUM(sa.Revenue) AS TotalRevenue FROM sales sa JOIN products p ON sa.ProductKey = p.ProductKey JOIN subcategory s ON p.ProductSubcategoryKey = s.ProductSubcategoryKey GROUP BY s.SubcategoryName"}\n'
         'Retourne : {"queries": [{"key": "nom_aggregat", "sql": "SELECT ..."}, ...]}'
     )
+
+
+def _pbi_table_name(ref: str) -> str:
+    """Extrait le nom de table depuis une ref 'powerbi://<table>' (cf. metadata_agent)."""
+    return ref.removeprefix("powerbi://")
+
+
+def _build_dax_schema_summary(state: PipelineState) -> str:
+    """Résumé du modèle sémantique Power BI (tables/colonnes/mesures/relations), limité à 2500 chars."""
+    lines: list[str] = []
+    files_meta = state.get("metadata", {}).get("files", {})
+
+    for ref, meta in files_meta.items():
+        table_name = _pbi_table_name(ref)
+        lines.append("Mesures DAX disponibles :" if table_name == "__measures__" else f"Table: {table_name}")
+        for col, info in meta.get("columns", {}).items():
+            semantic = info.get("semantic_name", col)
+            marker = "[mesure]" if info.get("kind") == "measure" else f"[{info.get('type', 'unknown')}]"
+            lines.append(f"  - {col}: {semantic} {marker}")
+
+    relations = state.get("semantic_model_info", {}).get("relations", [])
+    if relations:
+        lines.append("\nRelations du modèle :")
+        for rel in relations[:10]:
+            if not isinstance(rel, dict):
+                continue
+            from_table = rel.get("fromTable", rel.get("table_a", "?"))
+            from_col = rel.get("fromColumn", rel.get("col_a", "?"))
+            to_table = rel.get("toTable", rel.get("table_b", "?"))
+            to_col = rel.get("toColumn", rel.get("col_b", "?"))
+            lines.append(f"  {from_table}.{from_col} -> {to_table}.{to_col}")
+
+    return "\n".join(lines)[:2500]
+
+
+def _build_dax_schema_summary_from_rag(fields: list[dict]) -> str:
+    """Résumé du schéma construit depuis un sous-ensemble RAG (retrieve_relevant_fields),
+    au même format que _build_dax_schema_summary — colonnes groupées par table, mesures et
+    relations en sections dédiées."""
+    by_table: dict[str, list[dict]] = {}
+    measures: list[dict] = []
+    relations: list[dict] = []
+
+    for f in fields:
+        if f["object_type"] == "measure":
+            measures.append(f)
+        elif f["object_type"] == "relationship":
+            relations.append(f)
+        elif f["object_type"] == "column":
+            by_table.setdefault(f["parent_table"] or "?", []).append(f)
+        # object_type == "table" : entrée informationnelle seule, rien à lister dessous
+
+    lines: list[str] = []
+    for table_name, cols in by_table.items():
+        lines.append(f"Table: {table_name}")
+        for c in cols:
+            qname = c["qualified_name"]
+            field_name = qname.split("[", 1)[1][:-1] if "[" in qname else qname
+            desc = f" — {c['description']}" if c.get("description") else ""
+            lines.append(f"  - {field_name}{desc}")
+
+    if measures:
+        lines.append("Mesures DAX disponibles :")
+        for m in measures:
+            name = m["qualified_name"].strip("[]")
+            desc = f" — {m['description']}" if m.get("description") else ""
+            lines.append(f"  - {name}{desc}")
+
+    if relations:
+        lines.append("\nRelations du modèle :")
+        for r in relations:
+            lines.append(f"  {r['qualified_name']}")
+
+    return "\n".join(lines)[:2500]
+
+
+def _build_dax_prompt(user_prompt: str, schema_summary: str) -> str:
+    """Prompt LLM pour la génération DAX — ne contient que des noms de tables/colonnes/mesures."""
+    return (
+        f"Demande utilisateur : {user_prompt}\n\n"
+        f"Modèle sémantique Power BI :\n{schema_summary}\n\n"
+        "Génère des requêtes DAX qui répondent à la demande.\n"
+        "Règles :\n"
+        "  - Utilise uniquement les tables, colonnes et mesures listées ci-dessus\n"
+        "  - Préfère une mesure existante à un recalcul manuel si elle correspond exactement\n"
+        "  - Chaque requête commence par EVALUATE et retourne une table\n"
+        "  - Agrégation par catégorie : EVALUATE SUMMARIZECOLUMNS('Table'[Colonne], \"Alias\", [Mesure])\n"
+        "  - Évolution temporelle : EVALUATE SUMMARIZECOLUMNS('Calendrier'[Mois], \"Alias\", [Mesure]) "
+        "trié par la colonne temporelle\n"
+        "  - RÈGLE CRITIQUE ORDER BY : si vous triez par une colonne de tri dédiée différente de "
+        "la colonne affichée (ex: un champ '*Sort'/'*Order' séparé du libellé, courant dans les "
+        "tables calendrier — 'Année-Mois' affiché mais trié par 'AnneeMoisTri'), cette colonne de "
+        "tri DOIT AUSSI figurer dans SUMMARIZECOLUMNS, sinon DAX échoue avec \"impossible de "
+        "déterminer une valeur unique\". "
+        "Incorrect : SUMMARIZECOLUMNS('Calendrier'[Mois], \"CA\", [Total Ventes]) ORDER BY "
+        "'Calendrier'[MoisTri] — 'MoisTri' n'est pas dans la table résultat. "
+        "Correct : SUMMARIZECOLUMNS('Calendrier'[Mois], 'Calendrier'[MoisTri], \"CA\", "
+        "[Total Ventes]) ORDER BY 'Calendrier'[MoisTri]\n"
+        "  - KPI ou valeur unique : EVALUATE ROW(\"Alias\", [Mesure])\n"
+        "  - Alias explicites en français entre guillemets\n\n"
+        'Retourne : {"queries": [{"key": "nom_aggregat", "dax": "EVALUATE ..."}]}'
+    )
+
+
+def _strip_order_by(dax: str) -> str | None:
+    """Retire la clause ORDER BY finale d'une requête DAX, ou None si absente.
+
+    Repli léger avant le fallback COUNTROWS : un résultat groupé correct mais non trié
+    reste bien plus exploitable (pour un insight/graphique) qu'un simple comptage de lignes.
+    Couvre le cas fréquent où le LLM trie par une colonne absente de SUMMARIZECOLUMNS
+    (ex: une colonne '*Sort' dédiée d'une table calendrier) — cf. _build_dax_prompt.
+    """
+    import re as _re
+
+    match = _re.search(r"\border\s+by\b", dax, flags=_re.IGNORECASE)
+    if not match:
+        return None
+    return dax[: match.start()].rstrip().rstrip(",")
+
+
+def _compute_dax_fallback_queries(state: PipelineState) -> list[dict]:
+    """Requêtes DAX basiques (COUNTROWS par table, valeur des mesures) si la génération LLM échoue."""
+    queries: list[dict] = []
+    files_meta = state.get("metadata", {}).get("files", {})
+    for ref, meta in files_meta.items():
+        table_name = _pbi_table_name(ref)
+        if table_name == "__measures__":
+            for measure_name in meta.get("columns", {}):
+                queries.append(
+                    {"key": f"{measure_name}_total", "dax": f'EVALUATE ROW("{measure_name}", [{measure_name}])'}
+                )
+            continue
+        queries.append(
+            {"key": f"{table_name}_count", "dax": f'EVALUATE ROW("lignes", COUNTROWS(\'{table_name}\'))'}
+        )
+    return queries[:5]
 
 
 def _preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -271,23 +417,32 @@ def _compute_fallback(dfs: dict[str, pd.DataFrame]) -> dict:
 
 
 class DataAgent(BaseAgent):
-    """Agent 3 — Interprète le prompt, génère du SQL DuckDB, exécute les agrégations.
+    """Agent 3 — Interprète le prompt et exécute les agrégations, via SQL/DuckDB (CSV) ou DAX (Power BI local).
 
     RÈGLE ABSOLUE : les données brutes ne passent JAMAIS dans le LLM.
-    Le LLM ne reçoit que : schema_summary (noms + types) + noms des colonnes disponibles.
+    Le LLM ne reçoit que : schema_summary (noms + types) + noms des colonnes/mesures disponibles.
 
-    Étapes :
+    Mode "csv" (défaut) :
         A. Chargement des DataFrames depuis storage.
         B. Construction du schema_summary (métadonnées uniquement).
         C. Génération des requêtes SQL via LLM.
         D. Exécution DuckDB avec timeout 30s.
         E. Sérialisation des résultats (max 500 lignes).
         F. Fallback basique si l'exécution échoue.
+        Cache Redis : TTL 1h par (tenant, datasets, prompt).
 
-    Cache Redis : TTL 1h par (tenant, datasets, prompt).
+    Mode "powerbi_local" :
+        A. Génération DAX — settings.powerbi_dax_generation_mode :
+           "llm" (défaut, prompt LiteLLM) ou "mcp_native" (tool DAX du serveur MCP,
+           repli automatique sur "llm" si indisponible/échoue).
+        B. Exécution via powerbi_local_mcp.execute_dax() (pas de DuckDB).
+        C. Fallback COUNTROWS/mesures si la génération échoue.
+        D. Traçabilité des requêtes dans state["dax_queries"].
+        Pas de cache Redis (le modèle Power BI peut changer entre deux appels).
 
-    Input  : state["prompt"] + state["schema"] + state["metadata"]
-    Output : state["aggregates"]
+    Input  : state["prompt"] + state["schema"] + state["metadata"] (csv)
+             state["prompt"] + state["metadata"] + state["semantic_model_info"] (powerbi_local)
+    Output : state["aggregates"] (+ state["dax_queries"] en mode powerbi_local)
     Modèle : settings.litellm_cheap_model (gpt-4o-mini)
     """
 
@@ -295,6 +450,9 @@ class DataAgent(BaseAgent):
 
     async def run(self, state: PipelineState) -> PipelineState:
         log = logger.bind(report_id=state.get("report_id"))
+
+        if state.get("data_source") == "powerbi_local":
+            return await self._run_powerbi(state, log)
 
         # ── Cache check ──────────────────────────────────────────────────────
         cache_key = await make_cache_key(
@@ -365,3 +523,153 @@ class DataAgent(BaseAgent):
             await set_cache(cache_key, aggregates, ttl=3600)
 
         return state
+
+    async def _run_powerbi(self, state: PipelineState, log) -> PipelineState:
+        """Branche Power BI local : génère et exécute des requêtes DAX via MCP (pas de DuckDB)."""
+        client = get_powerbi_client()
+
+        # Le client MCP est un singleton process-wide (get_powerbi_client()) et ne conserve sa
+        # connexion que tant que le process backend tourne. Normalement, MetadataAgent l'a déjà
+        # établie ; mais quand metadata est réutilisé via base_report_id (_route_after_intent
+        # saute alors MetadataAgent), rien d'autre n'appelle connect_to_desktop_file() — un
+        # redémarrage backend entre deux messages de la même session ferait alors échouer
+        # execute_dax() avec "no connectionName provided". Reconnecter ici est idempotent côté
+        # MCP et sans coût si déjà connecté au bon fichier.
+        pbix_file_name = state.get("pbix_file_name", "")
+        if pbix_file_name and client._connected_file != pbix_file_name:
+            await client.connect_to_desktop_file(pbix_file_name)
+
+        schema_summary = await self._build_schema_summary_with_rag(state, log)
+
+        queries: list[dict] = []
+        if settings.powerbi_dax_generation_mode == "mcp_native":
+            queries = await self._generate_dax_native(client, state["prompt"], log)
+
+        if not queries:
+            dax_prompt = _build_dax_prompt(state["prompt"], schema_summary)
+            llm_result = await call_llm_json(
+                prompt=dax_prompt,
+                system=_DAX_SYSTEM_PROMPT,
+                model=settings.litellm_cheap_model,
+            )
+            queries = llm_result.get("queries", [])
+            if not isinstance(queries, list):
+                queries = []
+
+        log.info("data_agent_dax_generated", n_queries=len(queries))
+
+        aggregates: dict = {}
+        dax_log: list[dict] = []
+        exec_success = False
+
+        for q in queries:
+            key = q.get("key") or "query_result"
+            dax = q.get("dax", "").strip()
+            if not dax:
+                continue
+            try:
+                result = await client.execute_dax(dax)
+                aggregates[key] = result.get("rows", [])[:_MAX_ROWS]
+                dax_log.append({"key": key, "dax": dax, "status": "ok"})
+                exec_success = True
+                log.info("data_agent_dax_ok", key=key)
+                continue
+            except PowerBIDaxExecutionError as exc:
+                msg = f"DataAgent: DAX error ({key}): {exc}"
+                state["errors"] = state.get("errors", []) + [msg]
+                dax_log.append({"key": key, "dax": dax, "status": "error", "error": str(exc)})
+                log.warning("data_agent_dax_error", key=key, error=str(exc))
+
+            # Repli léger : retirer un ORDER BY qui référence une colonne hors résultat
+            # (cause d'échec la plus fréquente) avant d'abandonner cette requête — un résultat
+            # groupé non trié reste bien plus utile qu'un COUNTROWS générique.
+            dax_no_order = _strip_order_by(dax)
+            if dax_no_order and dax_no_order != dax:
+                try:
+                    result = await client.execute_dax(dax_no_order)
+                    aggregates[key] = result.get("rows", [])[:_MAX_ROWS]
+                    dax_log.append({"key": key, "dax": dax_no_order, "status": "ok_retry_no_order_by"})
+                    exec_success = True
+                    log.info("data_agent_dax_retry_no_order_by_ok", key=key)
+                except PowerBIDaxExecutionError as exc:
+                    dax_log.append(
+                        {"key": key, "dax": dax_no_order, "status": "retry_no_order_by_error", "error": str(exc)}
+                    )
+                    log.warning("data_agent_dax_retry_no_order_by_failed", key=key, error=str(exc))
+
+        # ── Fallback : COUNTROWS/mesures directes si la génération/exécution échoue ──
+        if not exec_success or not aggregates:
+            fallback_queries = _compute_dax_fallback_queries(state)
+            for q in fallback_queries:
+                try:
+                    result = await client.execute_dax(q["dax"])
+                    aggregates[q["key"]] = result.get("rows", [])[:_MAX_ROWS]
+                    dax_log.append({"key": q["key"], "dax": q["dax"], "status": "fallback_ok"})
+                except PowerBIDaxExecutionError as exc:
+                    dax_log.append(
+                        {"key": q["key"], "dax": q["dax"], "status": "fallback_error", "error": str(exc)}
+                    )
+            if aggregates:
+                warn = "DataAgent: fallback DAX utilisé"
+                state["errors"] = state.get("errors", []) + [warn]
+                log.warning("data_agent_dax_fallback_used")
+
+        state["aggregates"] = aggregates
+        state["dax_queries"] = state.get("dax_queries", []) + dax_log
+        return state
+
+    async def _build_schema_summary_with_rag(self, state: PipelineState, log) -> str:
+        """Construit le schema_summary via RAG (sous-ensemble pertinent de champs), avec
+        repli explicite sur le schéma complet si le retrieval échoue ou est vide.
+
+        Ne remplace que la SOURCE du schéma injecté dans le prompt DAX — la logique de
+        génération DAX elle-même (_build_dax_prompt) est inchangée.
+        """
+        tenant_id = state.get("tenant_id", "")
+        model_id = state.get("pbix_file_name", "")
+
+        try:
+            fields = await retrieve_relevant_fields(tenant_id, model_id, state["prompt"])
+        except Exception as exc:
+            log.warning("data_agent_schema_rag_failed_fallback_full", error=str(exc))
+            return _build_dax_schema_summary(state)
+
+        if not fields:
+            log.warning("data_agent_schema_rag_empty_fallback_full")
+            return _build_dax_schema_summary(state)
+
+        log.info("data_agent_schema_rag_used", n_fields=len(fields))
+        return _build_dax_schema_summary_from_rag(fields)
+
+    async def _generate_dax_native(self, client, prompt: str, log) -> list[dict]:
+        """Tente d'utiliser un tool MCP de génération DAX depuis du langage naturel.
+
+        Confirmé contre un vrai serveur (Power BI Modeling MCP v0.5.0-beta.11, via
+        list_tools()) : dax_query_operations ne supporte que "Help, Execute, Validate,
+        ClearCache" — il n'existe PAS d'opération de génération DAX depuis du langage
+        naturel dans cette version du serveur. Cet appel échouera donc systématiquement
+        aujourd'hui ; il est conservé pour basculer automatiquement dessus si Microsoft
+        ajoute cette capacité plus tard, sans changement de code applicatif.
+        Chaque retombée sur le mode "llm" est loggée en warning explicite (jamais silencieuse).
+        """
+        try:
+            result = await client.call_tool(
+                "dax_query_operations",
+                {"operation": "Generate", "naturalLanguageQuery": prompt},
+            )
+        except Exception as exc:
+            log.warning("data_agent_dax_native_unavailable_fallback_llm", error=str(exc))
+            return []
+
+        if isinstance(result, dict):
+            queries = result.get("queries") or result.get("dax")
+            if isinstance(queries, list) and queries:
+                return queries
+            if isinstance(queries, str) and queries:
+                return [{"key": "result", "dax": queries}]
+
+        log.warning(
+            "data_agent_dax_native_unexpected_response_fallback_llm",
+            result_type=type(result).__name__,
+        )
+        return []

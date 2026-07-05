@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from app.models.report import HITLReviewRequest
 from app.pipeline.checkpoints import resume_pipeline
 from app.services.report_store import get_report_state, save_report_state
+from app.services.schema_rag import update_field_from_hitl
 
 logger = structlog.get_logger(__name__)
 
@@ -88,6 +89,11 @@ async def post_review(report_id: str, body: HITLReviewRequest) -> dict:
     if body.action == "corrected" and body.corrections:
         _apply_corrections(state, body.checkpoint, body.corrections)
 
+    # CP1 en mode powerbi_local : synchroniser les descriptions validées par l'humain
+    # vers le RAG schéma (pgvector) — un champ à la fois, jamais une réindexation complète.
+    if body.checkpoint == "cp1_metadata" and state.get("data_source") == "powerbi_local":
+        await _sync_cp1_fields_to_schema_rag(state, body.corrections)
+
     # Réinitialiser le flag HITL
     state["hitl_pending"] = False
     state["hitl_checkpoint"] = None
@@ -157,6 +163,29 @@ async def _run_resume(pipeline, state: dict, report_id: str) -> None:
         current["status"] = "error"
         current["errors"] = current.get("errors", []) + [str(exc)]
         await save_report_state(report_id, current)
+
+
+async def _sync_cp1_fields_to_schema_rag(state: dict, corrections: dict) -> None:
+    """Répercute les descriptions validées humainement (CP1) vers le RAG schéma.
+
+    Ne traite QUE les champs explicitement présents dans `corrections["fields"]`
+    (format attendu : {"fields": {"Table[Colonne]": "description validée", ...}}) — pas
+    une boucle sur tout le schéma. Un CP1 sur un modèle Power BI non documenté peut
+    couvrir 100+ champs (cf. AdventureWorks) ; ré-embedder tout le lot sur une simple
+    approbation sans corrections ciblées serait coûteux (1 appel d'embedding par champ)
+    et n'indique pas vraiment quels champs l'humain a réellement validé un par un.
+    """
+    tenant_id = state.get("tenant_id", "")
+    model_id = state.get("pbix_file_name", "")
+    if not tenant_id or not model_id:
+        return
+
+    fields = corrections.get("fields") if isinstance(corrections, dict) else None
+    if not isinstance(fields, dict) or not fields:
+        return
+
+    for qualified_name, description in fields.items():
+        await update_field_from_hitl(tenant_id, model_id, qualified_name, str(description))
 
 
 def _apply_corrections(state: dict, checkpoint: str, corrections: dict) -> None:

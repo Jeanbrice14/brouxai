@@ -182,3 +182,193 @@ async def test_generate_rejects_invalid_prompt():
     assert response.status_code == 422, (
         f"Attendu 422 pour prompt trop court, obtenu {response.status_code}: {response.text}"
     )
+
+
+# ── generate-powerbi : réutilisation de metadata via base_report_id ────────────
+# (évite de redéclencher CP1 à chaque message — cf. graph.py::_route_after_intent)
+
+
+@pytest.mark.asyncio
+async def test_generate_powerbi_reuses_metadata_from_base_report_id():
+    """base_report_id fourni + metadata/semantic_model_info présents dans le rapport de
+    base → l'état initial du nouveau rapport doit les reprendre tels quels (CP1 ne doit
+    pas se redéclencher, cf. _route_after_intent qui vérifie state['metadata'])."""
+    from app.main import app
+
+    base_metadata = {"files": {"powerbi://Sales": {"columns": {"Region": {"confidence": 0.6}}}}}
+    base_semantic_model_info = {"tables": {"Sales": {}}, "measures": {}, "relations": []}
+    base_state = {
+        "report_id": "base-report-001",
+        "metadata": base_metadata,
+        "semantic_model_info": base_semantic_model_info,
+        "schema": {},
+    }
+
+    captured_state: dict = {}
+
+    async def _fake_save_report_state(report_id, state):
+        captured_state.update(state)
+
+    def _fake_create_task(coro):
+        coro.close()
+        return MagicMock()
+
+    with (
+        patch("app.api.v1.reports.get_report_state", AsyncMock(return_value=base_state)),
+        patch("app.api.v1.reports.save_report_state", AsyncMock(side_effect=_fake_save_report_state)),
+        patch("app.api.v1.reports._get_pipeline", return_value=MagicMock(ainvoke=AsyncMock())),
+        patch("app.api.v1.reports.asyncio.create_task", side_effect=_fake_create_task),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/reports/generate-powerbi",
+                data={
+                    "prompt": "Quelles sont les ventes totales par catégorie ?",
+                    "pbix_file_name": "AdventureWorks",
+                    "brand_kit": "{}",
+                    "session_id": "session-reuse-test",
+                    "base_report_id": "base-report-001",
+                },
+            )
+
+    assert response.status_code == 200, f"Réponse: {response.text}"
+    assert captured_state.get("metadata") == base_metadata
+    assert captured_state.get("semantic_model_info") == base_semantic_model_info
+
+
+@pytest.mark.asyncio
+async def test_generate_powerbi_without_base_report_id_starts_with_empty_metadata():
+    """Sans base_report_id (premier appel de la session) : metadata reste vide — c'est
+    le comportement attendu, metadata_agent doit tourner pour construire le Data Dictionary."""
+    from app.main import app
+
+    captured_state: dict = {}
+
+    async def _fake_save_report_state(report_id, state):
+        captured_state.update(state)
+
+    def _fake_create_task(coro):
+        coro.close()
+        return MagicMock()
+
+    with (
+        patch("app.api.v1.reports.save_report_state", AsyncMock(side_effect=_fake_save_report_state)),
+        patch("app.api.v1.reports._get_pipeline", return_value=MagicMock(ainvoke=AsyncMock())),
+        patch("app.api.v1.reports.asyncio.create_task", side_effect=_fake_create_task),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/reports/generate-powerbi",
+                data={
+                    "prompt": "Connecte-toi au modèle et analyse le schéma",
+                    "pbix_file_name": "AdventureWorks",
+                    "brand_kit": "{}",
+                },
+            )
+
+    assert response.status_code == 200, f"Réponse: {response.text}"
+    assert captured_state.get("metadata") == {}
+    assert captured_state.get("semantic_model_info") == {}
+
+
+# ── setup_only : connexion initiale sans vraie question ────────────────────────
+# (régression : le champ était envoyé par le frontend mais jamais lu côté backend)
+
+
+@pytest.mark.asyncio
+async def test_generate_powerbi_parses_setup_only_true():
+    """setup_only="true" (form-data, toujours une string) doit devenir state["setup_only"] = True."""
+    from app.main import app
+
+    captured_state: dict = {}
+
+    async def _fake_save_report_state(report_id, state):
+        captured_state.update(state)
+
+    def _fake_create_task(coro):
+        coro.close()
+        return MagicMock()
+
+    with (
+        patch("app.api.v1.reports.save_report_state", AsyncMock(side_effect=_fake_save_report_state)),
+        patch("app.api.v1.reports._get_pipeline", return_value=MagicMock(ainvoke=AsyncMock())),
+        patch("app.api.v1.reports.asyncio.create_task", side_effect=_fake_create_task),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/reports/generate-powerbi",
+                data={
+                    "prompt": "Connecte-toi au modèle et analyse le schéma",
+                    "pbix_file_name": "AdventureWorks",
+                    "brand_kit": "{}",
+                    "setup_only": "true",
+                },
+            )
+
+    assert response.status_code == 200, f"Réponse: {response.text}"
+    assert captured_state.get("setup_only") is True
+
+
+@pytest.mark.asyncio
+async def test_generate_powerbi_without_setup_only_defaults_false():
+    """Sans le champ setup_only (messages normaux) : state["setup_only"] doit rester False."""
+    from app.main import app
+
+    captured_state: dict = {}
+
+    async def _fake_save_report_state(report_id, state):
+        captured_state.update(state)
+
+    def _fake_create_task(coro):
+        coro.close()
+        return MagicMock()
+
+    with (
+        patch("app.api.v1.reports.save_report_state", AsyncMock(side_effect=_fake_save_report_state)),
+        patch("app.api.v1.reports._get_pipeline", return_value=MagicMock(ainvoke=AsyncMock())),
+        patch("app.api.v1.reports.asyncio.create_task", side_effect=_fake_create_task),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/reports/generate-powerbi",
+                data={
+                    "prompt": "Quel est le total des ventes par région ?",
+                    "pbix_file_name": "AdventureWorks",
+                    "brand_kit": "{}",
+                },
+            )
+
+    assert response.status_code == 200, f"Réponse: {response.text}"
+    assert captured_state.get("setup_only") is False
+
+
+@pytest.mark.asyncio
+async def test_generate_report_csv_parses_setup_only_true():
+    """Idem pour /reports/generate (mode CSV) — le frontend envoie déjà ce champ pour
+    l'upload initial (app/page.tsx), il doit maintenant être effectivement lu."""
+    from app.main import app
+
+    captured_state: dict = {}
+
+    async def _fake_save_report_state(report_id, state):
+        captured_state.update(state)
+
+    def _fake_create_task(coro):
+        coro.close()
+        return MagicMock()
+
+    with (
+        patch("app.api.v1.reports.upload_file", AsyncMock()),
+        patch("app.api.v1.reports.save_report_state", AsyncMock(side_effect=_fake_save_report_state)),
+        patch("app.api.v1.reports._get_pipeline", return_value=MagicMock(ainvoke=AsyncMock())),
+        patch("app.api.v1.reports.asyncio.create_task", side_effect=_fake_create_task),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/reports/generate",
+                data={"prompt": "Analyse et modélise ces données", "brand_kit": "{}", "setup_only": "true"},
+                files={"files": ("ventes.csv", _make_csv_bytes(), "text/csv")},
+            )
+
+    assert response.status_code == 200, f"Réponse: {response.text}"
+    assert captured_state.get("setup_only") is True

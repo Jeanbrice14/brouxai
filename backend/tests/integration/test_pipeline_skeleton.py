@@ -65,19 +65,19 @@ _MOCK_VIZ_SPEC = {
     "insight_ref": "Domination Nord",
 }
 
-# Narration longue (> 200 mots) sans Markdown — retournée par le mock StorytellingAgent
-_MOCK_NARRATIVE = (
-    "L'analyse des ventes régionales révèle des disparités marquées entre les zones géographiques. "
-    "Le Nord se positionne comme la région la plus performante de la période étudiée. "
-    "Cette concentration géographique mérite une attention particulière dans la stratégie commerciale. "
-    "Les équipes commerciales du Nord ont su capitaliser sur les opportunités du marché local. "
-    "En termes de recommandations, trois axes prioritaires se dégagent de cette analyse approfondie. "
-    "Premièrement, renforcer la présence commerciale dans les régions sous-performantes identifiées. "
-    "Deuxièmement, capitaliser sur le succès du Nord pour dupliquer les bonnes pratiques existantes. "
-    "Troisièmement, mettre en place un suivi mensuel des indicateurs clés par région géographique. "
-    "La redistribution des ressources commerciales constitue également une piste sérieuse à explorer. "
-    "Un plan d'action spécifique devra être déployé pour améliorer la performance globale. "
-) * 3  # ~300 mots
+# Réponse StorytellingAgent mode "report" (call_llm_json — le prompt de test classifie
+# en intent="full_report"/response_type="report", cf. sample_state ci-dessous).
+_MOCK_STORYTELLING_REPORT_RESPONSE = {
+    "title": "Analyse des ventes Q3 2024",
+    "executive_summary": (
+        "Le Nord domine le chiffre d'affaires régional sur la période étudiée. "
+        "Les équipes commerciales du Nord ont capitalisé sur les opportunités du marché local."
+    ),
+    "recommendations": [
+        "Renforcer la présence commerciale dans les régions sous-performantes.",
+        "Dupliquer les bonnes pratiques du Nord dans les autres régions.",
+    ],
+}
 
 # Réponse LLM universelle : satisfait aussi bien les appels "colonne" que "grain"
 _LLM_ANY_RESPONSE = {
@@ -121,7 +121,7 @@ def mock_external_deps():
     - SchemaLinkingAgent : read_dataframe + call_llm_json mockés (single-file → non appelés)
     - DataAgent          : cache hit mocké → LLM + storage non nécessaires
     - InsightAgent       : call_llm_json mocké (1 insight, confidence 0.90, pas de HITL)
-    - StorytellingAgent  : call_llm mocké (narration > 200 mots, pas de re-génération)
+    - StorytellingAgent  : call_llm_json mocké (mode "report" — {title, executive_summary, recommendations})
     - VizAgent           : call_llm_json mocké (viz_spec valide pour by_region)
     - QAAgent            : call_llm_json mocké (0 issue → confidence_score 1.0, pas de HITL)
     - LayoutAgent        : upload_file mocké (pas d'appel MinIO réel)
@@ -156,8 +156,8 @@ def mock_external_deps():
             AsyncMock(return_value=_MOCK_INSIGHTS_RESPONSE),
         ),
         patch(
-            "app.agents.storytelling_agent.call_llm",
-            AsyncMock(return_value=_MOCK_NARRATIVE),
+            "app.agents.storytelling_agent.call_llm_json",
+            AsyncMock(return_value=_MOCK_STORYTELLING_REPORT_RESPONSE),
         ),
         patch(
             "app.agents.viz_agent.call_llm_json",

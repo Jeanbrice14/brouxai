@@ -1,7 +1,8 @@
-.env
-.env.local
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.env
+.env.local
+tests/
